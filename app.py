@@ -8,7 +8,7 @@ import requests
 import cv2
 import base64
 import time
-from PIL import Image, ImageEnhance, ImageDraw, ImageFont
+from PIL import Image, ImageEnhance, ImageDraw
 from io import BytesIO
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 from tensorflow.keras.preprocessing import image
@@ -64,9 +64,9 @@ def init_resources():
     df_info = load_csv_smart('품목정보.csv')
     df_stock = load_csv_smart('현재고.csv')
     
-    # 🚀 [세이브포인트 복원] 재고 매칭 키 전처리 로직
+    # 🚀 [재고 로직 원복] strip().upper()를 사용한 정밀 매칭
     df_stock['재고수량'] = pd.to_numeric(df_stock['재고수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    df_stock['품번_KEY'] = df_stock['품번'].astype(str).str.strip().str.upper() 
+    df_stock['품번_KEY'] = df_stock['품번'].astype(str).str.strip().str.upper()
     agg_stock = df_stock.groupby('품번_KEY')['재고수량'].sum().to_dict()
     stock_date = str(int(df_stock['정산일자'].max())) if '정산일자' in df_stock.columns else "확인불가"
     
@@ -117,42 +117,76 @@ def four_point_transform(image, pts):
     M = cv2.getPerspectiveTransform(rect, dst)
     return cv2.warpPerspective(image, M, (maxWidth, maxHeight))
 
+# 🚀 [스마트 필터 원복] 세이브포인트 정밀 수치 적용
+def apply_smart_filters(img, category, lighting, brightness, sharpness):
+    if lighting == '백열등 (누런 조명)':
+        r, g, b = img.split(); b = b.point(lambda i: i * 1.2); img = Image.merge('RGB', (r, g, b))
+    elif lighting == '형광등 (푸른/녹색 조명)':
+        r, g, b = img.split(); r = r.point(lambda i: i * 1.1); img = Image.merge('RGB', (r, g, b))
+    
+    en_con = ImageEnhance.Contrast(img); en_shp = ImageEnhance.Sharpness(img); en_bri = ImageEnhance.Brightness(img); en_col = ImageEnhance.Color(img)
+    
+    if category == '마루/우드 (Wood)':
+        img = en_shp.enhance(2.0); img = en_con.enhance(1.1)
+    elif category == '하이그로시/유광 (Glossy)':
+        img = en_con.enhance(1.5); img = en_shp.enhance(1.2)
+    elif category == '벽지/패브릭 (Texture)':
+        img = en_shp.enhance(1.5); img = en_bri.enhance(1.1)
+    elif category == '석재/콘크리트 (Stone)':
+        img = en_col.enhance(0.8); img = en_shp.enhance(1.5)
+    
+    if brightness != 1.0: img = en_bri.enhance(brightness)
+    if sharpness != 1.0: img = en_shp.enhance(sharpness)
+    return img
+
 # --- [3] 메인 UI ---
 st.set_page_config(layout="wide", page_title="스마트 자재 패턴 검색")
 st.title("🏭 스마트 자재 패턴 검색")
 st.sidebar.info(f"📅 재고 기준일: {stock_date}")
 
-# 세션 상태 초기화
+# CSS 기반 맥박 애니메이션 (하트비트)
+st.markdown("""
+<style>
+@keyframes pulse {
+    0% { opacity: 0.5; transform: scale(0.98); }
+    50% { opacity: 1; transform: scale(1); }
+    100% { opacity: 0.5; transform: scale(0.98); }
+}
+.pulse-heart {
+    color: #ff4b4b;
+    font-weight: bold;
+    animation: pulse 1.5s infinite;
+    text-align: center;
+}
+</style>
+""", unsafe_allow_html=True)
+
 if 'points' not in st.session_state: st.session_state['points'] = []
 if 'search_done' not in st.session_state: st.session_state['search_done'] = False
-if 'uploader_key' not in st.session_state: st.session_state['uploader_key'] = 0
 if 'upload_ready' not in st.session_state: st.session_state['upload_ready'] = False
-if 'img_scale' not in st.session_state: st.session_state['img_scale'] = 1.0
 
-# 🚀 [개선] 동적 하트비트: 업로드 준비 버튼과 움직이는 스피너
+# 🚀 [동적 하트비트 구현]
 if not st.session_state['upload_ready']:
-    st.info("📱 모바일 연결을 활성화하기 위해 아래 버튼을 클릭하세요.")
-    if st.button("🚀 업로드 준비 및 연결 시작"):
+    st.warning("📱 모바일 환경에서는 '준비 시작' 버튼을 눌러 연결을 유지하세요.")
+    if st.button("🚀 업로드 준비 시작"):
         st.session_state['upload_ready'] = True
         st.rerun()
 else:
     with st.sidebar:
-        with st.spinner("💓 연결 유지 중 (활동 상태)"):
-            time.sleep(0.1) # 시각적인 움직임 제공
+        st.markdown('<div class="pulse-heart">💓 서버와 연결 유지 중...</div>', unsafe_allow_html=True)
+        time.sleep(0.01)
 
-    uploaded = st.file_uploader("📸 분석할 자재 사진 선택", type=['jpg','png','jpeg'], key=f"up_{st.session_state['uploader_key']}")
+    uploaded = st.file_uploader("📸 사진 업로드", type=['jpg','png','jpeg'], key=f"up_v24")
 
-    if st.sidebar.button("🔄 전체 초기화 (Reset)"):
-        for k in ['points', 'search_done', 'search_results', 'upload_ready', 'proc_img']:
-            if k in st.session_state: del st.session_state[k]
-        st.session_state['uploader_key'] += 1
+    if st.sidebar.button("🔄 전체 초기화"):
+        st.session_state.clear()
         st.rerun()
 
     if uploaded:
         if 'current_img_name' not in st.session_state or st.session_state['current_img_name'] != uploaded.name:
             st.session_state['points'] = []; st.session_state['search_done'] = False
             st.session_state['current_img_name'] = uploaded.name
-            with st.spinner('📸 이미지 처리 중...'):
+            with st.spinner('📸 최적화 중...'):
                 raw = Image.open(uploaded).convert('RGB')
                 raw.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
                 st.session_state['proc_img'] = raw
@@ -161,119 +195,129 @@ else:
         working_img = st.session_state['proc_img']
         
         st.markdown("### 1️⃣ 환경 설정")
-        col_opt1, col_opt2 = st.columns(2)
-        with col_opt1: mat_type = st.selectbox("🧱 자재 종류", ['일반', '마루/우드 (Wood)', '하이그로시/유광 (Glossy)'])
-        with col_opt2: s_mode = st.radio("🔎 검색 기준", ["🎨 컬러+패턴", "🦓 패턴 중심 (흑백)"], horizontal=True)
+        source_type = st.radio("📂 원본 종류", ['📸 현장 사진', '💻 디지털 파일'], horizontal=True)
+        is_photo = (source_type == '📸 현장 사진')
+        
+        c_opt1, c_opt2 = st.columns(2)
+        with c_opt1: mat_type = st.selectbox("🧱 자재 종류", ['일반', '마루/우드 (Wood)', '하이그로시/유광 (Glossy)', '벽지/패브릭 (Texture)', '석재/콘크리트 (Stone)'], disabled=not is_photo)
+        with c_opt2: s_mode = st.radio("🔎 검색 기준", ["🎨 컬러+패턴 종합", "🦓 패턴 중심 (흑백)"], horizontal=True)
+
+        with st.expander("⚙️ 고급 설정", expanded=False):
+            c1, c2, c3 = st.columns(3)
+            with c1: lighting = st.selectbox("조명", ['일반/자연광', '백열등 (누런 조명)', '형광등 (푸른/녹색 조명)'], disabled=not is_photo)
+            with c2: 
+                if st.button("↩️ 90도 회전"): 
+                    st.session_state['proc_img'] = working_img.rotate(90, expand=True)
+                    st.session_state['points'] = []; st.rerun()
+            with c3:
+                bri = st.slider("밝기", 0.5, 2.0, 1.0, 0.1, disabled=not is_photo)
+                shp = st.slider("선명도", 0.0, 3.0, 1.5, 0.1, disabled=not is_photo)
 
         st.markdown("### 2️⃣ 영역 지정")
         
-        # 스케일 조절 버튼
-        scale_val = st.select_slider("🔍 모바일 보기 크기 (작게 해서 점을 찍으세요)", 
-                                    options=[0.3, 0.5, 0.7, 1.0], value=st.session_state['img_scale'])
-        st.session_state['img_scale'] = scale_val
+        # 🚀 [UI 원복] 버튼식 크기 조절
+        scale_val = st.radio("🔍 보기 크기 (모바일은 축소 권장):", [0.3, 0.5, 0.7, 1.0], format_func=lambda x: f"{int(x*100)}%", index=3, horizontal=True)
 
-        # 🚀 [복원] 점 지우기 버튼 및 새로고침
         c_ref, c_del, c_auto = st.columns([1, 1, 2])
         with c_ref: 
-            if st.button("🔄 화면 새로고침"): st.rerun()
+            if st.button("🔄 이미지 안나옴"): st.rerun()
         with c_del:
+            # 🚀 [버튼 원복] 점 지우기 버튼
             if st.button("❌ 점 지우기", type="secondary"):
                 st.session_state['points'] = []; st.rerun()
         with c_auto:
-            if st.button("⏹️ 이미지 전체 선택 (Auto)", type="primary"):
+            if st.button("⏹️ 전체 선택", type="primary"):
                 w, h = working_img.size
                 st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]; st.rerun()
 
-        # 이미지 리사이징 및 점 그리기
+        # 표시용 이미지
         w, h = working_img.size
-        display_w, display_h = int(w * scale_val), int(h * scale_val)
-        display_img = working_img.resize((display_w, display_h), Image.Resampling.LANCZOS)
+        d_img = working_img.resize((int(w * scale_val), int(h * scale_val)), Image.Resampling.LANCZOS)
+        draw = ImageDraw.Draw(d_img)
         
-        draw_img = display_img.copy(); draw = ImageDraw.Draw(draw_img)
-        
-        # 🚀 [복원] 번호 표시(Point 1, 2...) 로직
+        # 🚀 [번호 복원] 포인트 번호 표시 (1,2,3,4)
         for i, p in enumerate(st.session_state['points']):
             px, py = p[0] * scale_val, p[1] * scale_val
             draw.ellipse((px-8, py-8, px+8, py+8), fill='red', outline='white', width=2)
-            # 번호 텍스트 추가
-            draw.text((px + 12, py - 12), str(i + 1), fill='red')
+            draw.text((px + 10, py - 10), str(i + 1), fill='red')
 
         if len(st.session_state['points']) == 4:
-            pts_scaled = [(p[0]*scale_val, p[1]*scale_val) for p in st.session_state['points']]
-            draw.polygon([tuple(p) for p in order_points(np.array(pts_scaled))], outline='#00FF00', width=3)
+            pts_s = [(p[0]*scale_val, p[1]*scale_val) for p in st.session_state['points']]
+            draw.polygon([tuple(p) for p in order_points(np.array(pts_s))], outline='#00FF00', width=3)
 
-        value = streamlit_image_coordinates(draw_img, key="click_pad")
+        value = streamlit_image_coordinates(d_img, key="click_pad")
         if value:
-            real_x, real_y = value['x'] / scale_val, value['y'] / scale_val
+            rx, ry = value['x'] / scale_val, value['y'] / scale_val
             if len(st.session_state['points']) < 4:
-                new_p = (real_x, real_y)
+                new_p = (rx, ry)
                 if not st.session_state['points'] or st.session_state['points'][-1] != new_p:
                     st.session_state['points'].append(new_p); st.rerun()
 
-        # --- [3] 검색 분석 ---
+        # 🚀 [미리보기 원복] 선택된 분석 영역 미리보기
         if len(st.session_state['points']) == 4:
-            if st.button("🔍 이 영역으로 검색 시작", type="primary", use_container_width=True):
-                with st.spinner('유사 패턴을 분석 중입니다...'):
-                    warped = four_point_transform(np.array(working_img), np.array(st.session_state['points'], dtype="float32"))
-                    final_img = Image.fromarray(warped)
-                    if s_mode == "🦓 패턴 중심 (흑백)": final_img = final_img.convert("L").convert("RGB")
-                    
+            st.markdown("#### 🔍 분석 영역 미리보기")
+            warped = four_point_transform(np.array(working_img), np.array(st.session_state['points'], dtype="float32"))
+            final_img = Image.fromarray(warped)
+            if is_photo: final_img = apply_smart_filters(final_img, mat_type, lighting, bri, shp)
+            if s_mode == "🦓 패턴 중심 (흑백)": final_img = final_img.convert("L").convert("RGB")
+            
+            st.image(final_img, width=300, caption="이 영역을 분석합니다")
+
+            if st.button("🔍 이 패턴으로 검색 시작", type="primary", use_container_width=True):
+                with st.spinner('유사 자재 찾는 중...'):
                     x = image.img_to_array(final_img.resize((224, 224)))
-                    query_vec = model.predict(preprocess_input(np.expand_dims(x, axis=0)), verbose=0).flatten().reshape(1, -1)
+                    q_vec = model.predict(preprocess_input(np.expand_dims(x, axis=0)), verbose=0).flatten().reshape(1, -1)
+                    db_n = list(feature_db.keys()); db_v = np.array(list(feature_db.values()))
+                    sims = cosine_similarity(q_vec, db_v).flatten()
                     
-                    db_names = list(feature_db.keys()); db_vecs = np.array(list(feature_db.values()))
-                    sims = cosine_similarity(query_vec, db_vecs).flatten()
+                    all_r, stock_r = [], []
+                    seen_all, seen_stock = set(), set()
+                    idx_sort = np.argsort(sims)[::-1]
                     
-                    all_res = []; stock_res = []
-                    seen_all = set(); seen_stock = set()
-                    
-                    sorted_idx = np.argsort(sims)[::-1]
-                    for i in sorted_idx:
-                        fname = db_names[i]
-                        info = master_map.get(get_digits(fname), {'formal': fname, 'name': '정보 없음'})
+                    for i in idx_sort:
+                        fn = db_n[i]
+                        info = master_map.get(get_digits(fn), {'formal': fn, 'name': '정보 없음'})
                         f_code = info['formal']
                         
-                        # 🚀 [세이브포인트 복원] 재고 매칭 키 (Strip + Upper)
+                        # 🚀 [재고 로직 원복] strip().upper()로 키 대조
                         f_key = f_code.strip().upper()
                         qty = agg_stock.get(f_key, 0)
                         
-                        url_row = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fname)]
-                        url = url_row['카카오톡_전송용_URL'].values[0] if not url_row.empty else None
+                        u_row = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fn)]
+                        url = u_row['카카오톡_전송용_URL'].values[0] if not u_row.empty else None
                         
                         if url:
-                            data = {'formal': f_code, 'name': info['name'], 'score': score, 'stock': qty, 'url': url}
-                            if f_code not in seen_all and len(all_res) < 15:
-                                all_res.append(data); seen_all.add(f_code)
-                            # 재고 100m 이상 별도 검색 풀
-                            if qty >= 100 and f_code not in seen_stock and len(stock_res) < 15:
-                                stock_res.append(data); seen_stock.add(f_code)
+                            data = {'formal': f_code, 'name': info['name'], 'score': sims[i], 'stock': qty, 'url': url}
+                            if f_code not in seen_all and len(all_r) < 15:
+                                all_r.append(data); seen_all.add(f_code)
+                            if qty >= 100 and f_code not in seen_stock and len(stock_r) < 15:
+                                stock_r.append(data); seen_stock.add(f_code)
                     
-                    st.session_state['search_results'] = {'all': all_res, 'stock': stock_res}
+                    st.session_state['search_results'] = {'all': all_r, 'stock': stock_r}
                     st.session_state['search_done'] = True; st.rerun()
 
-        # --- [4] 결과 카드 (액박 방지 requests 로직 유지) ---
-        if st.session_state.get('search_done'):
-            st.markdown("---")
-            res = st.session_state['search_results']
-            def draw_card(item, idx):
-                st.markdown(f"**{idx}. {item['formal']}**")
-                st.caption(f"{item['name']} (유사도: {item['score']:.1%})")
-                with st.expander("🖼️ 이미지 확인", expanded=False):
-                    try:
-                        r = requests.get(get_direct_url(item['url']), timeout=5)
-                        st.image(Image.open(BytesIO(r.content)), use_container_width=True)
-                    except: st.write("⚠️ 로드 실패")
-                if item['stock'] >= 100: st.success(f"재고: {item['stock']:,}m")
-                else: st.info(f"재고: {item['stock']:,}m")
+    if st.session_state.get('search_done'):
+        st.markdown("---")
+        res_data = st.session_state['search_results']
+        def draw_card(item, idx):
+            st.markdown(f"**{idx}. {item['formal']}**")
+            st.caption(f"{item['name']} (유사도: {item['score']:.1%})")
+            with st.expander("🖼️ 이미지 확인", expanded=False):
+                try:
+                    r = requests.get(get_direct_url(item['url']), timeout=5)
+                    st.image(Image.open(BytesIO(r.content)), use_container_width=True)
+                except: st.write("⚠️ 이미지 로드 실패")
+            if item['stock'] >= 100: st.success(f"재고: {item['stock']:,}m")
+            else: st.info(f"재고: {item['stock']:,}m")
 
-            t1, t2 = st.tabs(["📊 전체 결과", "✅ 재고 보유 유사도 (100m↑)"])
-            with t1:
+        t1, t2 = st.tabs(["📊 전체 결과", "✅ 재고 보유 (100m↑)"])
+        with t1:
+            cols = st.columns(5)
+            for i, r in enumerate(res_data['all']):
+                with cols[i%5]: draw_card(r, i+1)
+        with t2:
+            if res_data['stock']:
                 cols = st.columns(5)
-                for i, r in enumerate(res['all']):
+                for i, r in enumerate(res_data['stock']):
                     with cols[i%5]: draw_card(r, i+1)
-            with t2:
-                if res['stock']:
-                    cols = st.columns(5)
-                    for i, r in enumerate(res['stock']):
-                        with cols[i%5]: draw_card(r, i+1)
-                else: st.warning("⚠️ 100m 이상 재고 품목 중 유사 자재가 없습니다.")
+            else: st.warning("⚠️ 재고 100m 이상인 유사 자재가 없습니다.")
