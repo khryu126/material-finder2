@@ -1,5 +1,8 @@
 [server]
-wsPingTimeout = 60000
+# 연결 유지 시간을 10분(600,000ms)으로 대폭 상향
+wsPingTimeout = 600000 
+wsPingInterval = 10000
+maxMessageSize = 100
 maxUploadSize = 100
 
 [browser]
