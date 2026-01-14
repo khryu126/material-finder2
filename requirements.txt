@@ -6,4 +6,4 @@ tensorflow-cpu
 scikit-learn
 requests
 opencv-python-headless
-streamlit-drawable-canvas>=0.9.3
+streamlit-cropper
