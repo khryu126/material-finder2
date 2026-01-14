@@ -6,34 +6,14 @@ import re
 import os
 import requests
 import cv2
-import base64
 from PIL import Image, ImageEnhance
 from io import BytesIO
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 from tensorflow.keras.preprocessing import image
 from sklearn.metrics.pairwise import cosine_similarity
+from streamlit_cropper import st_cropper # 안정적인 크롭 라이브러리 사용
 
-# -----------------------------------------------------------
-# 🚑 [긴급 패치] Streamlit 최신 버전 & 이미지 호환성 해결
-# 이 코드가 있어야 '흰 화면' 없이 이미지가 잘 뜹니다.
-# -----------------------------------------------------------
-import streamlit.elements.image as st_image
-
-def local_image_to_url(image, width=None, clamp=False, channels="RGB", output_format="auto", image_id=None):
-    """PIL 이미지를 웹 브라우저가 무조건 보여줄 수 있는 PNG 포맷으로 변환"""
-    buffered = BytesIO()
-    image.save(buffered, format="PNG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-    return f"data:image/png;base64,{img_str}"
-
-# 라이브러리 강제 주입 (Monkey Patching)
-if not hasattr(st_image, 'image_to_url'):
-    st_image.image_to_url = local_image_to_url
-# -----------------------------------------------------------
-
-from streamlit_drawable_canvas import st_canvas
-
-# --- [1] 유틸리티 함수 ---
+# --- [1] 기본 유틸리티 함수 ---
 def get_direct_url(url):
     if not url or str(url) == 'nan' or 'drive.google.com' not in url: return url
     if 'file/d/' in url: file_id = url.split('file/d/')[1].split('/')[0]
@@ -84,32 +64,8 @@ def get_master_map():
 
 master_map = get_master_map()
 
-# --- [2] 이미지 처리 (투영/보정) ---
-def order_points(pts):
-    rect = np.zeros((4, 2), dtype="float32")
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-    return rect
-
-def four_point_transform(image, pts):
-    rect = order_points(pts)
-    (tl, tr, br, bl) = rect
-    widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
-    widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
-    maxWidth = max(int(widthA), int(widthB))
-    heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
-    heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
-    maxHeight = max(int(heightA), int(heightB))
-    dst = np.array([[0, 0], [maxWidth - 1, 0], [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1]], dtype="float32")
-    M = cv2.getPerspectiveTransform(rect, dst)
-    warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
-    return warped
-
-def apply_filters(img, lighting, surface, flooring_mode, brightness, sharpness):
+# --- [2] 이미지 보정 함수 ---
+def apply_filters(img, lighting, surface, brightness, sharpness):
     if lighting == '백열등 (누런 조명)':
         r, g, b = img.split()
         b = b.point(lambda i: i * 1.2)
@@ -120,34 +76,30 @@ def apply_filters(img, lighting, surface, flooring_mode, brightness, sharpness):
         img = Image.merge('RGB', (r, g, b))
     
     enhancer_con = ImageEnhance.Contrast(img)
-    enhancer_shp = ImageEnhance.Sharpness(img)
-
-    if flooring_mode != '해당 없음':
-        img = enhancer_shp.enhance(2.0)
-        img = enhancer_con.enhance(1.1)
-    else:
-        if surface == '하이그로시 (반사 심함)':
-            img = enhancer_con.enhance(1.5)
-        elif surface == '매트/엠보 (무광)':
-            img = enhancer_con.enhance(1.2)
-        if sharpness != 1.0:
-            img = enhancer_shp.enhance(sharpness)
+    if surface == '하이그로시 (반사 심함)':
+        img = enhancer_con.enhance(1.5)
+    elif surface == '매트/엠보 (무광)':
+        img = enhancer_con.enhance(1.2)
         
     if brightness != 1.0:
         img = ImageEnhance.Brightness(img).enhance(brightness)
+    if sharpness != 1.0:
+        img = ImageEnhance.Sharpness(img).enhance(sharpness)
+        
     return img
 
 # --- [3] 메인 UI ---
 st.set_page_config(layout="wide", page_title="스마트 자재 검색")
-st.title("🏭 스마트 자재 패턴 검색")
+st.title("🏭 스마트 자재 패턴 검색 (Simple Mode)")
 st.sidebar.info(f"📅 재고 기준일: {stock_date}")
 
 uploaded = st.file_uploader("자재 이미지를 업로드하세요", type=['jpg', 'png', 'tif', 'jpeg'])
 
 if uploaded:
-    st.markdown("### 🛠️ 이미지 전처리 및 영역 지정")
+    st.markdown("### 🛠️ 이미지 전처리")
     
-    with st.expander("📸 촬영 환경 및 고급 설정", expanded=True):
+    # 설정 옵션은 그대로 유지
+    with st.expander("📸 촬영 환경 설정", expanded=True):
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             source_type = st.radio("원본 종류", ['사진 촬영본', '이미지 파일 (스캔/디지털)'])
@@ -156,101 +108,66 @@ if uploaded:
         with c3:
             surface = st.selectbox("표면 재질", ['일반', '하이그로시 (반사 심함)', '매트/엠보 (무광)'], disabled=(source_type!='사진 촬영본'))
         with c4:
-            flooring_mode = st.selectbox("마루 모드", ['해당 없음', '일반 마루', '헤링본/쉐브론'], disabled=(source_type!='사진 촬영본'))
+            rotation = st.radio("회전", [0, 90, 180, 270], horizontal=True, format_func=lambda x: f"↩️ {x}도" if x else "원본")
 
-        c5, c6, c7 = st.columns(3)
+        c5, c6 = st.columns(2)
         with c5:
-            rotation = st.radio("사진 회전", [0, 90, 180, 270], horizontal=True, format_func=lambda x: f"↩️ {x}도" if x else "원본")
-        with c6:
             brightness = st.slider("💡 밝기", 0.5, 2.0, 1.0, 0.1) if source_type == '사진 촬영본' else 1.0
-        with c7:
+        with c6:
             sharpness = st.slider("🔪 선명도", 0.0, 3.0, 1.5, 0.1) if source_type == '사진 촬영본' else 1.0
 
-    # 1. 이미지 로드 및 회전
+    # 이미지 로드 및 회전
     try:
         original_image = Image.open(uploaded).convert('RGB')
         if rotation != 0:
             original_image = original_image.rotate(-rotation, expand=True)
-    except Exception as e:
-        st.error(f"이미지 로드 실패: {e}")
+    except:
+        st.error("이미지를 불러올 수 없습니다.")
         st.stop()
 
-    # 2. 캔버스용 리사이징
-    canvas_width = 600
-    w_percent = (canvas_width / float(original_image.size[0]))
-    h_size = int((float(original_image.size[1]) * float(w_percent)))
-    resized_image = original_image.resize((canvas_width, h_size))
+    # 4점 투영 대신 -> [사각형 크롭] 적용
+    st.info("👇 **패턴이 잘 보이는 영역을 드래그해서 선택하세요.** (배경 제거)")
     
-    st.info("👇 **시작점과 연결하지 않아도 됩니다!** 그냥 자재의 [4개 꼭지점]을 마우스로 콕콕 찍으세요.")
-
-    # 캔버스 리셋용 키
-    unique_key = f"canvas_{uploaded.name}_{rotation}_{brightness}"
-
-    # 3. 캔버스 호출 (Monkey Patch 적용됨 -> 흰 화면 해결)
-    canvas_result = st_canvas(
-        fill_color="rgba(255, 165, 0, 0.3)",
-        stroke_width=3,
-        stroke_color="#FF0000",
-        background_image=resized_image, 
-        update_streamlit=True,
-        height=h_size,
-        width=canvas_width,
-        drawing_mode="polygon",
-        key=unique_key,
+    # 미리 보정된 이미지를 크로퍼에 넣습니다 (눈으로 확인하기 편하게)
+    preview_img = apply_filters(original_image.copy(), lighting, surface, brightness, sharpness)
+    
+    # st_cropper는 매우 안정적입니다.
+    cropped_img = st_cropper(
+        preview_img,
+        realtime_update=True,
+        box_color='#FF0000',
+        aspect_ratio=None
     )
+    
+    st.caption("선택된 영역이 바로 분석됩니다.")
 
-    pts = []
-    if canvas_result.json_data is not None:
-        objects = canvas_result.json_data["objects"]
-        if objects:
-            path = objects[-1]["path"]
-            for p in path:
-                if p[0] == 'L' or p[0] == 'M': pts.append([p[1], p[2]])
-
-    # 4. 분석 시작 (점 4개만 있으면 자동 인식)
-    if len(pts) >= 4:
-        # 좌표 변환
-        pts = np.array(pts[:4], dtype="float32")
-        ratio = original_image.size[0] / canvas_width
-        original_pts = pts * ratio
-        cv_img = np.array(original_image)
-        warped = four_point_transform(cv_img, original_pts)
-        
-        final_img = Image.fromarray(warped)
-        if source_type == '사진 촬영본':
-            final_img = apply_filters(final_img, lighting, surface, flooring_mode, brightness, sharpness)
-        
-        c_res1, c_res2 = st.columns(2)
-        with c_res1: st.image(resized_image, caption="선택 영역", width=300)
-        with c_res2: st.image(final_img, caption="최종 분석 이미지 (자동 펴짐)", width=300)
-
-        if st.button("🔍 이 조건으로 검색 시작", type="primary"):
-            with st.spinner('AI 분석 중...'):
-                x = image.img_to_array(final_img.resize((224, 224)))
-                x = np.expand_dims(x, axis=0)
-                query_vec = model.predict(preprocess_input(x), verbose=0).flatten().reshape(1, -1)
+    if st.button("🔍 검색 시작", type="primary"):
+        with st.spinner('AI 분석 중...'):
+            # 이미 필터가 적용된 이미지를 크롭했으므로 바로 분석
+            x = image.img_to_array(cropped_img.resize((224, 224)))
+            x = np.expand_dims(x, axis=0)
+            query_vec = model.predict(preprocess_input(x), verbose=0).flatten().reshape(1, -1)
+            
+            db_names, db_vecs = list(feature_db.keys()), np.array(list(feature_db.values()))
+            sims = cosine_similarity(query_vec, db_vecs).flatten()
+            
+            results = []
+            for i in range(len(db_names)):
+                fname = db_names[i]
+                info = master_map.get(get_digits(fname), {'formal': fname, 'name': '정보 없음'})
+                formal = info['formal']
+                qty = agg_stock.get(formal.strip().upper(), 0)
                 
-                db_names, db_vecs = list(feature_db.keys()), np.array(list(feature_db.values()))
-                sims = cosine_similarity(query_vec, db_vecs).flatten()
+                url_row = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fname)]
+                if url_row.empty: url_row = df_path[df_path['파일명'] == fname]
+                url = url_row['카카오톡_전송용_URL'].values[0] if not url_row.empty else None
                 
-                results = []
-                for i in range(len(db_names)):
-                    fname = db_names[i]
-                    info = master_map.get(get_digits(fname), {'formal': fname, 'name': '정보 없음'})
-                    formal = info['formal']
-                    qty = agg_stock.get(formal.strip().upper(), 0)
-                    
-                    url_row = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fname)]
-                    if url_row.empty: url_row = df_path[df_path['파일명'] == fname]
-                    url = url_row['카카오톡_전송용_URL'].values[0] if not url_row.empty else None
-                    
-                    results.append({'formal': formal, 'name': info['name'], 'score': sims[i], 'stock': qty, 'url': url})
-                
-                results = sorted(results, key=lambda x: x['score'], reverse=True)
-                st.session_state['search_results'] = results
-                st.session_state['search_done'] = True
+                results.append({'formal': formal, 'name': info['name'], 'score': sims[i], 'stock': qty, 'url': url})
+            
+            results = sorted(results, key=lambda x: x['score'], reverse=True)
+            st.session_state['search_results'] = results
+            st.session_state['search_done'] = True
 
-    # 5. 결과 출력
     if st.session_state.get('search_done'):
         st.markdown("---")
         results = st.session_state['search_results']
