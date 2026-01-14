@@ -12,8 +12,9 @@ from tensorflow.keras.preprocessing import image
 from sklearn.metrics.pairwise import cosine_similarity
 from streamlit_cropper import st_cropper
 
-# --- [1] 기본 함수들 (CSV 로드, 링크 변환 등) ---
+# --- [1] 기본 유틸리티 함수 ---
 def get_direct_url(url):
+    """구글 드라이브 미리보기 링크를 다운로드 링크로 변환"""
     if not url or str(url) == 'nan' or 'drive.google.com' not in url: return url
     if 'file/d/' in url: file_id = url.split('file/d/')[1].split('/')[0]
     elif 'id=' in url: file_id = url.split('id=')[1].split('&')[0]
@@ -21,6 +22,7 @@ def get_direct_url(url):
     return f'https://drive.google.com/uc?export=download&id={file_id}'
 
 def load_csv_smart(target_name):
+    """CSV 파일 인코딩 및 대소문자 자동 처리"""
     files = os.listdir('.')
     for f in files:
         if f.lower() == target_name.lower():
@@ -63,99 +65,109 @@ def get_master_map():
 
 master_map = get_master_map()
 
-# --- [2] 이미지 통합 보정 함수 (조명/재질/밝기/선명도) ---
-def apply_filters(img, source_type, lighting, surface, brightness, sharpness, rotation):
-    # 1. 회전 적용 (가장 먼저 수행)
+# --- [2] 이미지 보정 및 마루 최적화 로직 ---
+def apply_filters(img, source_type, lighting, surface, brightness, sharpness, rotation, flooring_mode):
+    # 1. 회전
     if rotation != 0:
         img = img.rotate(-rotation, expand=True)
 
     if source_type == '이미지 파일 (스캔/디지털)':
         return img
     
-    # 2. 조명(Color) 보정
+    # 2. 조명 보정
     if lighting == '백열등 (누런 조명)':
         r, g, b = img.split()
-        b = b.point(lambda i: i * 1.2) # 파란색 강조
+        b = b.point(lambda i: i * 1.2)
         img = Image.merge('RGB', (r, g, b))
     elif lighting == '형광등 (푸른/녹색 조명)':
         r, g, b = img.split()
-        r = r.point(lambda i: i * 1.1) # 붉은색 강조
+        r = r.point(lambda i: i * 1.1)
         img = Image.merge('RGB', (r, g, b))
     
-    # 3. 표면 재질(Contrast) 보정
+    # 3. 표면/마루 특화 보정
     enhancer_con = ImageEnhance.Contrast(img)
-    if surface == '하이그로시 (반사 심함)':
-        img = enhancer_con.enhance(1.5)
-    elif surface == '매트/엠보 (무광)':
-        img = enhancer_con.enhance(1.2)
+    enhancer_shp = ImageEnhance.Sharpness(img)
+
+    if flooring_mode != '해당 없음':
+        # [마루 특화 로직]
+        # 마루는 멀리서 찍어서 패턴이 뭉개지기 쉬우므로 선명도를 강하게 줍니다.
+        # 헤링본/쉐브론 등은 대비를 너무 높이면 줄눈이 강조되므로 적당히 조절합니다.
+        img = enhancer_shp.enhance(2.0) # 선명도 대폭 강화
+        img = enhancer_con.enhance(1.1) # 대비는 살짝만
+    else:
+        # [일반 자재 로직]
+        if surface == '하이그로시 (반사 심함)':
+            img = enhancer_con.enhance(1.5)
+        elif surface == '매트/엠보 (무광)':
+            img = enhancer_con.enhance(1.2)
+            
+        if sharpness != 1.0:
+            img = enhancer_shp.enhance(sharpness)
         
-    # 4. 밝기(Brightness) 보정 (사용자 슬라이더)
+    # 4. 밝기 보정
     if brightness != 1.0:
         enhancer_bri = ImageEnhance.Brightness(img)
         img = enhancer_bri.enhance(brightness)
-
-    # 5. 선명도(Sharpness) 보정 (사용자 슬라이더)
-    if sharpness != 1.0:
-        enhancer_shp = ImageEnhance.Sharpness(img)
-        img = enhancer_shp.enhance(sharpness)
         
     return img
 
-# --- [3] UI 구성 ---
+# --- [3] 메인 UI ---
 st.set_page_config(layout="wide", page_title="스마트 자재 검색")
-st.title("🏭 스마트 자재 패턴 검색")
+st.title("🏭 스마트 자재 패턴 검색 (마루/조명 대응)")
 st.sidebar.info(f"📅 재고 기준일: {stock_date}")
 
 uploaded = st.file_uploader("자재 이미지를 업로드하세요", type=['jpg', 'png', 'tif', 'jpeg'])
 
 if uploaded:
-    st.markdown("### 🛠️ 이미지 전처리 옵션")
+    st.markdown("### 🛠️ 이미지 처리 옵션")
     
-    # [옵션 1] 기본 환경 설정 (Expander로 묶어서 깔끔하게)
-    with st.expander("📸 촬영 환경 및 회전 설정", expanded=True):
-        c1, c2, c3, c4 = st.columns(4)
+    with st.expander("📸 촬영 환경 및 마루 설정 (클릭하여 열기)", expanded=True):
+        c1, c2, c3 = st.columns(3)
         with c1:
             source_type = st.radio("원본 종류", ['사진 촬영본', '이미지 파일 (스캔/디지털)'])
         with c2:
             lighting = st.selectbox("조명 색상", ['일반/자연광', '백열등 (누런 조명)', '형광등 (푸른/녹색 조명)'], disabled=(source_type!='사진 촬영본'))
         with c3:
-            surface = st.selectbox("표면 재질", ['일반', '하이그로시 (반사 심함)', '매트/엠보 (무광)'], disabled=(source_type!='사진 촬영본'))
+            # [신규 기능] 마루 패턴 선택
+            flooring_mode = st.selectbox("마루/바닥재 여부", 
+                                       ['해당 없음', '일반 마루 (계단식/스퀘어)', '헤링본/쉐브론 (갈매기형)'],
+                                       disabled=(source_type!='사진 촬영본'))
+
+        c4, c5, c6 = st.columns(3)
         with c4:
-            rotation = st.radio("사진 회전", [0, 90, 180, 270], format_func=lambda x: f"↩️ {x}도" if x else "원본 방향")
+            rotation = st.radio("사진 회전", [0, 90, 180, 270], horizontal=True, format_func=lambda x: f"↩️ {x}도" if x else "원본")
+        with c5:
+            brightness = st.slider("💡 밝기", 0.5, 2.0, 1.0, 0.1) if source_type == '사진 촬영본' else 1.0
+        with c6:
+            sharpness = st.slider("🔪 선명도", 0.0, 3.0, 1.5, 0.1) if source_type == '사진 촬영본' else 1.0
 
-    # [옵션 2] 미세 조정 슬라이더 (어두운 사진 등을 위해)
-    if source_type == '사진 촬영본':
-        c_bri, c_shp = st.columns(2)
-        with c_bri:
-            brightness = st.slider("💡 밝기 조절", 0.5, 2.0, 1.0, 0.1, help="왼쪽: 어둡게 / 오른쪽: 밝게")
-        with c_shp:
-            sharpness = st.slider("🔪 선명도 조절", 0.0, 3.0, 1.5, 0.1, help="흔들린 사진일수록 높이세요")
-    else:
-        brightness, sharpness = 1.0, 1.0
-
-    # 2. 이미지 자르기 & 미리보기
+    # 이미지 로드 및 미리보기
     img_raw = Image.open(uploaded).convert('RGB')
     
-    # [실시간 미리보기용 임시 보정 적용] - 자르기 전에 회전이나 보정 효과를 눈으로 확인
-    img_preview = apply_filters(img_raw, source_type, lighting, surface, brightness, sharpness, rotation)
+    # 마루 선택 시 팁 제공
+    if flooring_mode == '헤링본/쉐브론 (갈매기형)':
+        st.info("💡 **[Tip]** 헤링본/쉐브론 패턴은 'V자 줄눈'이 아닌 **'나무 한 조각(Plank)'** 위주로 잘라주시면 정확도가 대폭 상승합니다.")
+    elif flooring_mode == '일반 마루 (계단식/스퀘어)':
+        st.info("💡 **[Tip]** 여러 장이 섞인 모습보다 **나무 무늬가 잘 보이는 한 칸**을 중심으로 잘라주세요.")
+
+    # 보정 적용 (미리보기용)
+    img_preview = apply_filters(img_raw, source_type, lighting, '일반', brightness, sharpness, rotation, flooring_mode)
 
     if source_type == '사진 촬영본':
-        st.info("👇 마우스로 패턴이 잘 보이는 영역을 드래그하세요.")
-        # 자르기 도구에는 '회전 및 보정이 끝난 이미지'를 넣습니다.
+        st.write("👇 **분석할 영역을 드래그하세요 (필수)**")
         cropped_img = st_cropper(img_preview, realtime_update=True, box_color='#FF0000', aspect_ratio=None)
-        st.caption("선택된 영역만 잘라서 분석합니다.")
     else:
         cropped_img = img_preview
-        st.image(cropped_img, width=300, caption="분석 대상 이미지")
+        st.image(cropped_img, width=300, caption="분석 대상")
 
-    # 3. 분석 버튼
-    if st.button("🔍 이 조건으로 검색 시작", type="primary"):
-        with st.spinner('AI 분석 중...'):
-            # (이미 위에서 보정된 cropped_img를 바로 사용)
+    if st.button("🔍 검색 시작", type="primary"):
+        with st.spinner('AI 정밀 분석 중...'):
+            # AI 분석
             x = image.img_to_array(cropped_img.resize((224, 224)))
             x = np.expand_dims(x, axis=0)
             query_vec = model.predict(preprocess_input(x), verbose=0).flatten().reshape(1, -1)
             
+            # DB 매칭
             db_names, db_vecs = list(feature_db.keys()), np.array(list(feature_db.values()))
             sims = cosine_similarity(query_vec, db_vecs).flatten()
             
@@ -166,6 +178,7 @@ if uploaded:
                 formal = info['formal']
                 qty = agg_stock.get(formal.strip().upper(), 0)
                 
+                # 이미지 링크 찾기 (숫자 기반)
                 url_row = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fname)]
                 if url_row.empty: url_row = df_path[df_path['파일명'] == fname]
                 url = url_row['카카오톡_전송용_URL'].values[0] if not url_row.empty else None
@@ -176,7 +189,7 @@ if uploaded:
             st.session_state['search_results'] = results
             st.session_state['search_done'] = True
 
-    # 4. 결과 출력
+    # --- [4] 결과 출력 ---
     if st.session_state.get('search_done'):
         st.markdown("---")
         results = st.session_state['search_results']
@@ -185,14 +198,24 @@ if uploaded:
             st.markdown(f"**{idx}. {item['formal']}**")
             st.write(f"{item['name']}")
             st.caption(f"유사도: {item['score']:.1%}")
-            with st.expander("이미지 보기"):
-                if item['url']:
+            
+            # [복구 완료] 고화질 원본 링크 버튼
+            if item['url']:
+                direct_url = get_direct_url(item['url'])
+                # 버튼처럼 보이는 링크 제공
+                st.markdown(f"🔗 [**고화질 원본 보기 (새창)**]({item['url']})")
+                
+                # 이미지 미리보기 (Expander)
+                with st.expander("🖼️ 미리보기 펼치기", expanded=False):
                     try:
-                        r = requests.get(get_direct_url(item['url']), timeout=5)
+                        r = requests.get(direct_url, timeout=5)
                         st.image(Image.open(BytesIO(r.content)), use_container_width=True)
-                    except: st.write("로딩 실패")
-            if item['stock'] >= 100: st.success(f"{item['stock']:,}m")
-            else: st.write(f"{item['stock']:,}m")
+                    except: st.write("미리보기 로딩 실패")
+            else:
+                st.write("이미지 없음")
+                
+            if item['stock'] >= 100: st.success(f"재고: {item['stock']:,}m")
+            else: st.write(f"재고: {item['stock']:,}m")
 
         t1, t2 = st.tabs(["📊 전체 결과", "✅ 재고 보유 (100m↑)"])
         with t1:
@@ -205,4 +228,4 @@ if uploaded:
                 cols = st.columns(5)
                 for i, r in enumerate(hits[:10]):
                     with cols[i%5]: display_card(r, i+1)
-            else: st.warning("재고 보유 자재 없음")
+            else: st.warning("조건에 맞는 재고 자재가 없습니다.")
