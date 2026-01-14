@@ -80,15 +80,15 @@ def get_master_map():
 
 master_map = get_master_map()
 
-# --- [2] 이미지 처리 (투영/필터/리사이즈) ---
+# --- [2] 이미지 처리 ---
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)] # 좌상
-    rect[2] = pts[np.argmax(s)] # 우하
+    rect[0] = pts[np.argmin(s)] 
+    rect[2] = pts[np.argmax(s)] 
     diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)] # 우상
-    rect[3] = pts[np.argmax(diff)] # 좌하
+    rect[1] = pts[np.argmin(diff)] 
+    rect[3] = pts[np.argmax(diff)] 
     return rect
 
 def four_point_transform(image, pts):
@@ -106,7 +106,6 @@ def four_point_transform(image, pts):
     return warped
 
 def apply_smart_filters(img, category, lighting, brightness, sharpness):
-    # 1. 조명 보정
     if lighting == '백열등 (누런 조명)':
         r, g, b = img.split()
         b = b.point(lambda i: i * 1.2)
@@ -121,7 +120,6 @@ def apply_smart_filters(img, category, lighting, brightness, sharpness):
     enhancer_bri = ImageEnhance.Brightness(img)
     enhancer_col = ImageEnhance.Color(img)
 
-    # 2. 자재별 자동 보정 (프리셋)
     if category == '마루/우드 (Wood)':
         img = enhancer_shp.enhance(2.0)
         img = enhancer_con.enhance(1.1)
@@ -135,7 +133,6 @@ def apply_smart_filters(img, category, lighting, brightness, sharpness):
         img = enhancer_col.enhance(0.8)
         img = enhancer_shp.enhance(1.5)
     
-    # 3. 수동 미세 조정
     if brightness != 1.0: img = enhancer_bri.enhance(brightness)
     if sharpness != 1.0: img = enhancer_shp.enhance(sharpness)
         
@@ -160,16 +157,15 @@ if 'search_done' not in st.session_state: st.session_state['search_done'] = Fals
 # 가이드
 with st.expander("📘 [필독] 사용 방법 (클릭)", expanded=False):
     st.markdown("""
-    1. **원본 종류 선택:** 현장 사진인지, 스캔된 파일인지 먼저 선택하세요.
-    2. **자재 종류 선택:** 마루, 타일 등 자재 특성을 고르면 AI가 더 잘 알아봅니다.
-    3. **영역 지정:** 이미지 위에서 **모서리 4곳을 클릭**하면 찌그러진 사진을 펴줍니다.
-    4. **검색:** '검색 시작' 버튼을 누르면 유사한 자재를 찾아줍니다.
+    1. **원본 종류 선택:** 현장 사진인지, 디지털 파일인지 선택하세요. (디지털 파일은 '전체 선택' 추천)
+    2. **자재 종류:** 마루, 타일 등 특성을 고르면 인식이 더 잘 됩니다.
+    3. **영역 지정:** - **[전체 선택] 버튼:** 이미지가 반듯하다면 한 번에 선택!
+       - **4점 클릭:** 삐뚤어진 사진은 모서리 4개를 찍어서 펴주세요.
+    4. **검색:** '검색 시작' 버튼 클릭!
     """)
 
-# 업로더
 uploaded = st.file_uploader("자재 이미지를 업로드하세요", type=['jpg', 'png', 'tif', 'jpeg'], key=f"up_{st.session_state['uploader_key']}")
 
-# 전체 리셋 버튼
 if st.sidebar.button("🔄 처음부터 다시 하기 (Reset)"):
     st.session_state['points'] = []
     st.session_state['search_done'] = False
@@ -178,7 +174,6 @@ if st.sidebar.button("🔄 처음부터 다시 하기 (Reset)"):
     st.rerun()
 
 if uploaded:
-    # 이미지 로드 & 리셋
     if 'current_img_name' not in st.session_state or st.session_state['current_img_name'] != uploaded.name:
         st.session_state['points'] = []
         st.session_state['search_done'] = False
@@ -196,36 +191,21 @@ if uploaded:
 
     working_img = st.session_state['proc_img']
 
-    # --- [1] 환경 설정 (원본 구분 부활!) ---
+    # --- [1] 환경 설정 ---
     st.markdown("### 1️⃣ 환경 설정")
-    
-    # 🌟 [부활] 원본 종류 선택
-    source_type = st.radio(
-        "📂 원본 파일 종류 (필수)", 
-        ['📸 현장 촬영 사진 (보정 필요)', '💻 이미지 파일 (스캔/디지털 - 보정 없음)'], 
-        horizontal=True,
-        index=0
-    )
-    is_photo = (source_type == '📸 현장 촬영 사진 (보정 필요)')
+    source_type = st.radio("📂 원본 파일 종류", ['📸 현장 촬영 사진', '💻 이미지 파일 (스캔/디지털)'], horizontal=True)
+    is_photo = (source_type == '📸 현장 촬영 사진')
 
     col_opt1, col_opt2 = st.columns(2)
     with col_opt1:
-        # 사진일 때만 자재 필터 활성화
         material_type = st.selectbox(
             "🧱 자재 종류 (자동 필터)", 
             ['일반 (기본)', '마루/우드 (Wood)', '하이그로시/유광 (Glossy)', '벽지/패브릭 (Texture)', '석재/콘크리트 (Stone)'],
-            disabled=not is_photo,
-            help="현장 사진일 경우, 자재 특성에 맞게 화질을 개선합니다."
+            disabled=not is_photo
         )
     with col_opt2:
-        search_mode = st.radio(
-            "🔎 검색 기준", 
-            ["🎨 컬러 + 패턴 종합", "🦓 패턴/질감 중심 (색상 무시)"], 
-            horizontal=True,
-            help="조명이 너무 강해서 색이 이상하다면 '패턴 중심'을 선택하세요."
-        )
+        search_mode = st.radio("🔎 검색 기준", ["🎨 컬러 + 패턴 종합", "🦓 패턴/질감 중심 (색상 무시)"], horizontal=True)
 
-    # 고급 설정도 사진일 때만 활성화 (디지털 파일은 굳이 건드릴 필요 없음)
     with st.expander("⚙️ 고급 설정 (조명, 회전, 밝기)", expanded=False):
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -240,9 +220,19 @@ if uploaded:
             sharpness = st.slider("선명도", 0.0, 3.0, 1.5, 0.1, disabled=not is_photo)
 
     # --- [2] 영역 지정 ---
-    st.markdown("### 2️⃣ 영역 지정 (4점 클릭)")
-    st.info(f"👇 자재의 **모서리 4곳을 클릭**해주세요. ({len(st.session_state['points'])}/4 완료)")
+    st.markdown("### 2️⃣ 영역 지정")
     
+    # 🌟 [NEW] 전체 선택 버튼 (디지털 파일용)
+    col_sel1, col_sel2 = st.columns([3, 2])
+    with col_sel1:
+        st.info(f"👇 **모서리 4곳을 클릭**하거나 **전체 선택**을 누르세요. ({len(st.session_state['points'])}/4)")
+    with col_sel2:
+        if st.button("⏹️ 이미지 전체 선택 (Auto)", type="primary", help="이미지 전체를 분석 영역으로 잡습니다. (스캔 파일용)"):
+            w, h = working_img.size
+            # 전체 4점 좌표 자동 생성
+            st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]
+            st.rerun()
+
     draw_img = working_img.copy()
     draw = ImageDraw.Draw(draw_img)
     
@@ -269,7 +259,7 @@ if uploaded:
             st.session_state['points'] = []
             st.rerun()
 
-    # --- [3] 분석 및 결과 ---
+    # --- [3] 분석 ---
     if len(st.session_state['points']) == 4:
         st.markdown("### 3️⃣ 분석 결과")
         
@@ -279,18 +269,16 @@ if uploaded:
         
         final_img = Image.fromarray(warped)
         
-        # [조건부 필터 적용] 사진일 때만 보정 수행
         if is_photo:
             final_img = apply_smart_filters(final_img, material_type, lighting, brightness, sharpness)
         
-        # 흑백 모드 처리
         if search_mode == "🦓 패턴/질감 중심 (색상 무시)":
             final_img = final_img.convert("L").convert("RGB")
 
         col_p1, col_p2 = st.columns(2)
-        with col_p1: st.image(final_img, caption="분석용 이미지", width=300)
+        with col_p1: st.image(final_img, caption="최종 분석 이미지", width=300)
         with col_p2:
-            st.write("👉 선택한 영역이 맞나요?")
+            st.write("👉 분석할 영역이 맞나요?")
             if st.button("🔍 검색 시작", type="primary"):
                 with st.spinner('유사한 자재 찾는 중...'):
                     x = image.img_to_array(final_img.resize((224, 224)))
@@ -318,6 +306,7 @@ if uploaded:
                     st.session_state['search_done'] = True
                     st.rerun()
 
+    # --- [4] 결과 카드 ---
     if st.session_state.get('search_done'):
         st.markdown("---")
         results = st.session_state['search_results']
