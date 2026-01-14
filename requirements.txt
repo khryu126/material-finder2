@@ -1,0 +1,9 @@
+streamlit==1.25.0
+pandas
+numpy
+pillow
+tensorflow-cpu
+scikit-learn
+requests
+opencv-python-headless
+streamlit-drawable-canvas
