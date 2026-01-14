@@ -1,9 +1,0 @@
-streamlit==1.25.0
-pandas
-numpy<2.0.0
-pillow
-tensorflow-cpu==2.15.0
-scikit-learn
-requests
-opencv-python-headless
-streamlit-drawable-canvas
