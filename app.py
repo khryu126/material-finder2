@@ -152,7 +152,6 @@ def apply_smart_filters(img, category, lighting, brightness, sharpness):
         
     return img
 
-# [기능 1] 이미지 크기 조절을 위해 max_width를 가변으로 받음
 def resize_for_display(img, max_width=800):
     if img.width > max_width:
         w_percent = (max_width / float(img.width))
@@ -168,7 +167,7 @@ st.sidebar.info(f"📅 재고 기준일: {stock_date}")
 if 'points' not in st.session_state: st.session_state['points'] = []
 if 'uploader_key' not in st.session_state: st.session_state['uploader_key'] = 0
 if 'search_done' not in st.session_state: st.session_state['search_done'] = False
-if 'input_source' not in st.session_state: st.session_state['input_source'] = None # 파일인지 카메라인지 추적
+if 'input_source' not in st.session_state: st.session_state['input_source'] = None
 
 with st.expander("📘 [필독] 사용 방법 (클릭)", expanded=False):
     st.markdown("""
@@ -183,7 +182,6 @@ with st.expander("📘 [필독] 사용 방법 (클릭)", expanded=False):
        - **컬러 중심:** 무늬는 무시하고 색감만 비슷하면 될 때 (블러)
     """)
 
-# [기능 2] 탭으로 파일 업로드 / 카메라 촬영 분리
 tab1, tab2 = st.tabs(["📂 파일 업로드", "📸 카메라 촬영"])
 
 input_file = None
@@ -201,7 +199,6 @@ with tab2:
         input_file = camera_shot
         active_source = "camera"
 
-# 리셋 버튼
 if st.sidebar.button("🔄 처음부터 다시 하기 (Reset)"):
     st.session_state['points'] = []
     st.session_state['search_done'] = False
@@ -211,9 +208,7 @@ if st.sidebar.button("🔄 처음부터 다시 하기 (Reset)"):
     st.session_state['current_img_name'] = None
     st.rerun()
 
-# 입력 처리 (파일 또는 카메라)
 if input_file:
-    # 새로운 입력이 들어오면 리셋
     is_new = False
     file_id = input_file.name if hasattr(input_file, 'name') else "camera_img"
     
@@ -229,22 +224,18 @@ if input_file:
         with st.spinner('📸 이미지 최적화 중...'):
             try:
                 raw = Image.open(input_file).convert('RGB')
-                # 원본은 세션에 저장 (나중에 크기 조절용)
                 st.session_state['raw_img'] = raw
-                # 초기 디스플레이용 (800px)
                 st.session_state['proc_img'] = resize_for_display(raw, max_width=800)
             except:
                 st.error("이미지 처리 실패")
                 st.stop()
         st.rerun()
 
-    # 원본 이미지가 있어야 진행
     if 'raw_img' in st.session_state:
         working_raw = st.session_state['raw_img']
 
         st.markdown("### 1️⃣ 환경 설정")
         
-        # 카메라면 자동으로 '현장 촬영'으로 간주
         default_idx = 0 if active_source == "camera" else 1
         source_type = st.radio("📂 원본 종류", ['📸 현장 촬영 사진', '💻 이미지 파일 (스캔/디지털)'], index=0, horizontal=True)
         is_photo = (source_type == '📸 현장 촬영 사진')
@@ -257,7 +248,6 @@ if input_file:
                 disabled=not is_photo
             )
         with col_opt2:
-            # [기능 3] 컬러 중심 모드 추가
             search_mode = st.radio(
                 "🔎 검색 기준", 
                 ["🎨 컬러 + 패턴 (기본)", "🦓 패턴/질감 중심 (흑백)", "🎨 컬러/톤 중심 (패턴 뭉개기)"], 
@@ -279,14 +269,9 @@ if input_file:
                 brightness = st.slider("밝기", 0.5, 2.0, 1.0, 0.1, disabled=not is_photo)
                 sharpness = st.slider("선명도", 0.0, 3.0, 1.5, 0.1, disabled=not is_photo)
 
-        # --- [2] 영역 지정 ---
         st.markdown("### 2️⃣ 영역 지정")
         
-        # [기능 1] 줌(Zoom) 슬라이더 추가
-        zoom_level = st.slider("🔍 이미지 확대/축소 (클릭하기 편하게 조절하세요)", 300, 1500, 600, 50, help="이미지가 너무 크면 줄이고, 작으면 키워서 찍으세요.")
-        
-        # 현재 줌 레벨에 맞춰 이미지 리사이징 (화면 표시용)
-        # 중요: 원본(working_raw)에서 리사이징해야 깨지지 않음
+        zoom_level = st.slider("🔍 이미지 확대/축소", 300, 1500, 600, 50)
         display_img = resize_for_display(working_raw, max_width=zoom_level)
 
         col_sel1, col_sel2 = st.columns([3, 2])
@@ -294,7 +279,7 @@ if input_file:
             st.info(f"👇 **모서리 4곳을 클릭**하세요. ({len(st.session_state['points'])}/4)")
         with col_sel2:
             if st.button("⏹️ 전체 선택 (스캔파일용)", type="primary"):
-                w, h = display_img.size # 현재 보이는 크기 기준
+                w, h = display_img.size
                 st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]
                 st.rerun()
 
@@ -310,8 +295,7 @@ if input_file:
             rect = order_points(pts)
             draw.polygon([tuple(p) for p in rect], outline='#00FF00', width=4)
 
-        # 좌표 클릭 컴포넌트
-        value = streamlit_image_coordinates(draw_img, key=f"click_pad_{zoom_level}") # 줌 바뀔때 키 변경하여 리셋 방지
+        value = streamlit_image_coordinates(draw_img, key=f"click_pad_{zoom_level}")
 
         if value is not None:
             new_point = (value['x'], value['y'])
@@ -325,40 +309,30 @@ if input_file:
                 st.session_state['points'] = []
                 st.rerun()
 
-        # --- [3] 분석 ---
         if len(st.session_state['points']) == 4:
             st.markdown("### 3️⃣ 분석 결과")
             
-            # 1. 화면 좌표(Zoom된 상태) -> 원본 좌표로 변환
             ratio = working_raw.width / display_img.width
             original_pts = np.array(st.session_state['points'], dtype="float32") * ratio
             
-            # 2. 원본 이미지에서 투영 변환 (고화질 유지)
             cv_img = np.array(working_raw)
             warped = four_point_transform(cv_img, original_pts)
             final_img = Image.fromarray(warped)
             
-            # 3. 필터 적용
             if is_photo:
                 final_img = apply_smart_filters(final_img, material_type, lighting, brightness, sharpness)
             
-            # 4. 검색 모드별 이미지 전처리
             proc_img_for_ai = final_img.copy()
-            
             if search_mode == "🦓 패턴/질감 중심 (흑백)":
-                # 색상 제거 -> 패턴만 남음
                 proc_img_for_ai = final_img.convert("L").convert("RGB")
-                
             elif search_mode == "🎨 컬러/톤 중심 (패턴 뭉개기)":
-                # [핵심] 블러 처리로 패턴 제거 -> 색감만 남음
                 proc_img_for_ai = final_img.filter(ImageFilter.GaussianBlur(radius=10))
 
             col_p1, col_p2 = st.columns(2)
-            with col_p1: 
-                st.image(final_img, caption="최종 자재 이미지 (사람용)", width=300)
+            with col_p1: st.image(final_img, caption="최종 자재 이미지", width=300)
             with col_p2:
                 if search_mode == "🎨 컬러/톤 중심 (패턴 뭉개기)":
-                     st.image(proc_img_for_ai, caption="AI가 보는 이미지 (색감만 추출)", width=300)
+                     st.image(proc_img_for_ai, caption="AI 분석용 (색감만 추출)", width=300)
                 
                 if st.button("🔍 검색 시작", type="primary"):
                     with st.spinner('유사한 자재 찾는 중...'):
@@ -369,7 +343,8 @@ if input_file:
                         db_names, db_vecs = list(feature_db.keys()), np.array(list(feature_db.values()))
                         sims = cosine_similarity(query_vec, db_vecs).flatten()
                         
-                        results = []
+                        # 🚀 [핵심] 중복 제거를 위한 로직
+                        raw_results = []
                         for i in range(len(db_names)):
                             fname = db_names[i]
                             target_digits = extract_digits(fname)
@@ -391,10 +366,26 @@ if input_file:
                             url_match = df_path[df_path['추출된_품번'].apply(extract_digits) == target_digits]
                             url = url_match.iloc[0]['카카오톡_전송용_URL'] if not url_match.empty else None
                             
-                            results.append({'formal': formal, 'name': info['name'], 'lab_no': lab_no, 'score': sims[i], 'stock': qty, 'url': url})
+                            # 점수와 함께 저장
+                            raw_results.append({'formal': formal, 'name': info['name'], 'lab_no': lab_no, 'score': sims[i], 'stock': qty, 'url': url})
                         
-                        results = sorted(results, key=lambda x: x['score'], reverse=True)
-                        st.session_state['search_results'] = results
+                        # 1. 점수순 정렬
+                        raw_results.sort(key=lambda x: x['score'], reverse=True)
+                        
+                        # 2. 중복 제거 (이미 나온 품번은 건너뜀)
+                        seen_codes = set()
+                        unique_results = []
+                        
+                        for res in raw_results:
+                            # 식별자: 정식품번 + (Lab No가 다르면 별도 취급)
+                            # 보통은 formal 코드로 묶으면 됨
+                            code_id = res['formal']
+                            
+                            if code_id not in seen_codes:
+                                unique_results.append(res)
+                                seen_codes.add(code_id)
+                        
+                        st.session_state['search_results'] = unique_results
                         st.session_state['search_done'] = True
                         st.rerun()
 
