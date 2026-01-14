@@ -6,14 +6,30 @@ import re
 import os
 import requests
 import cv2
-from PIL import Image, ImageEnhance, ImageDraw
+import base64
+from PIL import Image, ImageEnhance, ImageDraw, ImageOps
 from io import BytesIO
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 from tensorflow.keras.preprocessing import image
 from sklearn.metrics.pairwise import cosine_similarity
 from streamlit_image_coordinates import streamlit_image_coordinates
 
-# --- [1] 기본 유틸리티 ---
+# -----------------------------------------------------------
+# 🚑 [필수 패치] Streamlit 호환성 해결
+# -----------------------------------------------------------
+import streamlit.elements.image as st_image
+
+def local_image_to_url(image, width=None, clamp=False, channels="RGB", output_format="auto", image_id=None):
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return f"data:image/png;base64,{img_str}"
+
+if not hasattr(st_image, 'image_to_url'):
+    st_image.image_to_url = local_image_to_url
+# -----------------------------------------------------------
+
+# --- [1] 유틸리티 ---
 def get_direct_url(url):
     if not url or str(url) == 'nan' or 'drive.google.com' not in url: return url
     if 'file/d/' in url: file_id = url.split('file/d/')[1].split('/')[0]
@@ -68,11 +84,11 @@ master_map = get_master_map()
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)] # 좌상
-    rect[2] = pts[np.argmax(s)] # 우하
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
     diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)] # 우상
-    rect[3] = pts[np.argmax(diff)] # 좌하
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
     return rect
 
 def four_point_transform(image, pts):
@@ -90,6 +106,7 @@ def four_point_transform(image, pts):
     return warped
 
 def apply_filters(img, lighting, surface, flooring_mode, brightness, sharpness):
+    # 조명 보정
     if lighting == '백열등 (누런 조명)':
         r, g, b = img.split()
         b = b.point(lambda i: i * 1.2)
@@ -117,9 +134,7 @@ def apply_filters(img, lighting, surface, flooring_mode, brightness, sharpness):
         img = ImageEnhance.Brightness(img).enhance(brightness)
     return img
 
-# 🚀 [속도 최적화] 이미지 리사이징 함수
 def resize_image_for_speed(img, max_width=800):
-    """이미지 가로폭을 max_width로 줄여서 속도를 높임"""
     if img.width > max_width:
         w_percent = (max_width / float(img.width))
         h_size = int((float(img.height) * float(w_percent)))
@@ -128,18 +143,16 @@ def resize_image_for_speed(img, max_width=800):
 
 # --- [3] 메인 UI ---
 st.set_page_config(layout="wide", page_title="스마트 자재 검색")
-st.title("🏭 스마트 자재 패턴 검색 (Fast Mode)")
+st.title("🏭 스마트 자재 패턴 검색")
 st.sidebar.info(f"📅 재고 기준일: {stock_date}")
 
-# 세션 상태 초기화
+# 세션 상태
 if 'points' not in st.session_state: st.session_state['points'] = []
 if 'current_img' not in st.session_state: st.session_state['current_img'] = None
 if 'uploader_key' not in st.session_state: st.session_state['uploader_key'] = 0
 
-# 파일 업로더
 uploaded = st.file_uploader("자재 이미지를 업로드하세요", type=['jpg', 'png', 'tif', 'jpeg'], key=f"up_{st.session_state['uploader_key']}")
 
-# 초기화 버튼
 if st.sidebar.button("🔄 처음부터 다시 하기"):
     st.session_state['points'] = []
     st.session_state['current_img'] = None
@@ -147,23 +160,29 @@ if st.sidebar.button("🔄 처음부터 다시 하기"):
     st.rerun()
 
 if uploaded:
-    # 🚀 [핵심] 이미지를 한 번만 로드하고 리사이징해서 세션에 저장 (속도 향상)
     if st.session_state['current_img'] is None or uploaded.name != st.session_state.get('last_filename'):
         try:
             raw = Image.open(uploaded).convert('RGB')
-            # 여기서 바로 800px로 줄여버림 -> 로딩 속도 10배 빨라짐
             st.session_state['current_img'] = resize_image_for_speed(raw, max_width=800)
             st.session_state['last_filename'] = uploaded.name
-            st.session_state['points'] = [] # 새 이미지면 점 초기화
+            st.session_state['points'] = []
         except:
             st.error("이미지 로딩 실패")
             st.stop()
 
-    # 작업용 이미지는 세션에서 가져옴
     working_img = st.session_state['current_img']
 
-    st.markdown("### 🛠️ 환경 설정 & 영역 지정")
-    with st.expander("📸 촬영 환경 설정", expanded=True):
+    st.markdown("### 🛠️ 검색 설정 및 영역 지정")
+    
+    # [NEW] 검색 모드 추가
+    search_mode = st.radio(
+        "🔎 검색 기준 선택", 
+        ["🎨 컬러 + 패턴 종합 (기본)", "🦓 패턴/질감 중심 (색상 무시)"], 
+        horizontal=True,
+        help="조명 색이 너무 강하거나, 색상은 다르지만 무늬가 같은 자재를 찾을 때 '패턴 중심'을 선택하세요."
+    )
+
+    with st.expander("📸 상세 환경 설정 (조명/재질)", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             source_type = st.radio("원본 종류", ['사진 촬영본', '이미지 파일 (스캔/디지털)'])
@@ -176,17 +195,16 @@ if uploaded:
         
         c5, c6, c7 = st.columns(3)
         with c5:
-            # 회전은 버튼 누를 때마다 세션 이미지를 돌림
             if st.button("↩️ 90도 회전"):
                 st.session_state['current_img'] = working_img.rotate(90, expand=True)
-                st.session_state['points'] = [] # 회전하면 좌표 초기화
+                st.session_state['points'] = []
                 st.rerun()
         with c6:
             brightness = st.slider("💡 밝기", 0.5, 2.0, 1.0, 0.1) if source_type == '사진 촬영본' else 1.0
         with c7:
             sharpness = st.slider("🔪 선명도", 0.0, 3.0, 1.5, 0.1) if source_type == '사진 촬영본' else 1.0
 
-    # 좌표 그리기 준비
+    # 좌표 그리기
     draw_img = working_img.copy()
     draw = ImageDraw.Draw(draw_img)
     for p in st.session_state['points']:
@@ -199,7 +217,6 @@ if uploaded:
 
     st.info(f"👇 **자재의 모서리 4곳을 클릭하세요.** ({len(st.session_state['points'])}/4 완료)")
     
-    # 좌표 입력 컴포넌트
     value = streamlit_image_coordinates(draw_img, key="pilot")
 
     if value is not None:
@@ -224,8 +241,13 @@ if uploaded:
         if source_type == '사진 촬영본':
             final_img = apply_filters(final_img, lighting, surface, flooring_mode, brightness, sharpness)
         
-        st.success("✅ 변환 완료! 아래 이미지가 분석에 사용됩니다.")
-        st.image(final_img, caption="최종 분석 이미지 (보정됨)", width=300)
+        # [NEW] 패턴 중심 모드일 경우 흑백 변환 (색상 정보 제거)
+        if search_mode == "🦓 패턴/질감 중심 (색상 무시)":
+            final_img = final_img.convert("L").convert("RGB")
+            st.caption("ℹ️ 색상을 제거하고 텍스처 위주로 분석합니다.")
+
+        st.success("✅ 준비 완료!")
+        st.image(final_img, caption="AI가 분석할 이미지", width=300)
 
         if st.button("🔍 검색 시작", type="primary"):
             with st.spinner('AI 분석 중...'):
