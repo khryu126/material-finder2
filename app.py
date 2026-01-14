@@ -12,9 +12,28 @@ from io import BytesIO
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 from tensorflow.keras.preprocessing import image
 from sklearn.metrics.pairwise import cosine_similarity
+
+# -----------------------------------------------------------
+# 🚑 [긴급 패치] Streamlit 최신 버전 & 이미지 호환성 해결
+# 이 코드가 있어야 '흰 화면' 없이 이미지가 잘 뜹니다.
+# -----------------------------------------------------------
+import streamlit.elements.image as st_image
+
+def local_image_to_url(image, width=None, clamp=False, channels="RGB", output_format="auto", image_id=None):
+    """PIL 이미지를 웹 브라우저가 무조건 보여줄 수 있는 PNG 포맷으로 변환"""
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return f"data:image/png;base64,{img_str}"
+
+# 라이브러리 강제 주입 (Monkey Patching)
+if not hasattr(st_image, 'image_to_url'):
+    st_image.image_to_url = local_image_to_url
+# -----------------------------------------------------------
+
 from streamlit_drawable_canvas import st_canvas
 
-# --- [1] 기본 유틸리티 함수 ---
+# --- [1] 유틸리티 함수 ---
 def get_direct_url(url):
     if not url or str(url) == 'nan' or 'drive.google.com' not in url: return url
     if 'file/d/' in url: file_id = url.split('file/d/')[1].split('/')[0]
@@ -31,13 +50,6 @@ def load_csv_smart(target_name):
                 except: continue
     st.error(f"❌ {target_name} 파일을 찾을 수 없습니다.")
     st.stop()
-
-# 💡 [핵심] 이미지를 캔버스가 100% 이해하는 '문자열(Base64)'로 변환하는 함수
-def pil_to_base64(img):
-    buffered = BytesIO()
-    img.save(buffered, format="PNG") # 무조건 PNG로 통일
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-    return f"data:image/png;base64,{img_str}"
 
 @st.cache_resource
 def init_resources():
@@ -72,7 +84,7 @@ def get_master_map():
 
 master_map = get_master_map()
 
-# --- [2] 이미지 처리 로직 (투영/보정) ---
+# --- [2] 이미지 처리 (투영/보정) ---
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
@@ -154,39 +166,32 @@ if uploaded:
         with c7:
             sharpness = st.slider("🔪 선명도", 0.0, 3.0, 1.5, 0.1) if source_type == '사진 촬영본' else 1.0
 
-    # 1. 이미지 로드
+    # 1. 이미지 로드 및 회전
     try:
         original_image = Image.open(uploaded).convert('RGB')
         if rotation != 0:
             original_image = original_image.rotate(-rotation, expand=True)
     except Exception as e:
-        st.error(f"이미지 처리 중 오류 발생: {e}")
+        st.error(f"이미지 로드 실패: {e}")
         st.stop()
 
-    # 2. 캔버스용 리사이징 & 문자열 변환 (흰 화면 해결의 열쇠)
+    # 2. 캔버스용 리사이징
     canvas_width = 600
     w_percent = (canvas_width / float(original_image.size[0]))
     h_size = int((float(original_image.size[1]) * float(w_percent)))
-    
-    # [수정됨] 리사이즈 후 즉시 Base64 문자열로 변환합니다.
     resized_image = original_image.resize((canvas_width, h_size))
-    bg_image_url = pil_to_base64(resized_image)
+    
+    st.info("👇 **시작점과 연결하지 않아도 됩니다!** 그냥 자재의 [4개 꼭지점]을 마우스로 콕콕 찍으세요.")
 
-    # 팁 출력
-    if flooring_mode == '헤링본/쉐브론':
-        st.info("💡 **[Tip]** 헤링본은 여러 쪽이 섞여도 좋으니 **넓게** 영역을 잡아주세요.")
-    else:
-        st.info("👇 **이미지 위에서 [4개 꼭지점]을 마우스로 콕콕 찍으세요.** (자동으로 펴줍니다)")
-
-    # Key를 통한 강제 리셋 (새 이미지 올렸을 때 갱신 안 되는 문제 해결)
+    # 캔버스 리셋용 키
     unique_key = f"canvas_{uploaded.name}_{rotation}_{brightness}"
 
-    # 3. 캔버스 호출
+    # 3. 캔버스 호출 (Monkey Patch 적용됨 -> 흰 화면 해결)
     canvas_result = st_canvas(
         fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=3,
         stroke_color="#FF0000",
-        background_image=bg_image_url, # 이미지 객체 대신 문자열을 전달
+        background_image=resized_image, 
         update_streamlit=True,
         height=h_size,
         width=canvas_width,
@@ -202,8 +207,9 @@ if uploaded:
             for p in path:
                 if p[0] == 'L' or p[0] == 'M': pts.append([p[1], p[2]])
 
-    # 4. 분석 시작
+    # 4. 분석 시작 (점 4개만 있으면 자동 인식)
     if len(pts) >= 4:
+        # 좌표 변환
         pts = np.array(pts[:4], dtype="float32")
         ratio = original_image.size[0] / canvas_width
         original_pts = pts * ratio
@@ -216,7 +222,7 @@ if uploaded:
         
         c_res1, c_res2 = st.columns(2)
         with c_res1: st.image(resized_image, caption="선택 영역", width=300)
-        with c_res2: st.image(final_img, caption="최종 분석 이미지", width=300)
+        with c_res2: st.image(final_img, caption="최종 분석 이미지 (자동 펴짐)", width=300)
 
         if st.button("🔍 이 조건으로 검색 시작", type="primary"):
             with st.spinner('AI 분석 중...'):
