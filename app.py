@@ -64,7 +64,7 @@ def init_resources():
     df_info = load_csv_smart('품목정보.csv')
     df_stock = load_csv_smart('현재고.csv')
     
-    # 🚀 [재고 로직 원복] strip().upper()를 사용한 정밀 매칭
+    # 🚀 [재고 로직 유지] strip().upper()를 사용한 정밀 매칭
     df_stock['재고수량'] = pd.to_numeric(df_stock['재고수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df_stock['품번_KEY'] = df_stock['품번'].astype(str).str.strip().str.upper()
     agg_stock = df_stock.groupby('품번_KEY')['재고수량'].sum().to_dict()
@@ -117,7 +117,7 @@ def four_point_transform(image, pts):
     M = cv2.getPerspectiveTransform(rect, dst)
     return cv2.warpPerspective(image, M, (maxWidth, maxHeight))
 
-# 🚀 [스마트 필터 원복] 세이브포인트 정밀 수치 적용
+# 🚀 [스마트 필터 수치 유지] 세이브포인트 수치
 def apply_smart_filters(img, category, lighting, brightness, sharpness):
     if lighting == '백열등 (누런 조명)':
         r, g, b = img.split(); b = b.point(lambda i: i * 1.2); img = Image.merge('RGB', (r, g, b))
@@ -144,39 +144,20 @@ st.set_page_config(layout="wide", page_title="스마트 자재 패턴 검색")
 st.title("🏭 스마트 자재 패턴 검색")
 st.sidebar.info(f"📅 재고 기준일: {stock_date}")
 
-# CSS 기반 맥박 애니메이션 (하트비트)
-st.markdown("""
-<style>
-@keyframes pulse {
-    0% { opacity: 0.5; transform: scale(0.98); }
-    50% { opacity: 1; transform: scale(1); }
-    100% { opacity: 0.5; transform: scale(0.98); }
-}
-.pulse-heart {
-    color: #ff4b4b;
-    font-weight: bold;
-    animation: pulse 1.5s infinite;
-    text-align: center;
-}
-</style>
-""", unsafe_allow_html=True)
-
+# 세션 상태 초기화
 if 'points' not in st.session_state: st.session_state['points'] = []
 if 'search_done' not in st.session_state: st.session_state['search_done'] = False
 if 'upload_ready' not in st.session_state: st.session_state['upload_ready'] = False
+if 'refresh_count' not in st.session_state: st.session_state['refresh_count'] = 0
 
-# 🚀 [동적 하트비트 구현]
+# 🚀 [히트비트 제거] 업로드 준비 버튼만 유지
 if not st.session_state['upload_ready']:
-    st.warning("📱 모바일 환경에서는 '준비 시작' 버튼을 눌러 연결을 유지하세요.")
+    st.warning("📱 모바일 환경에서는 '준비 시작' 버튼을 눌러 연결을 활성화하세요.")
     if st.button("🚀 업로드 준비 시작"):
         st.session_state['upload_ready'] = True
         st.rerun()
 else:
-    with st.sidebar:
-        st.markdown('<div class="pulse-heart">💓 서버와 연결 유지 중...</div>', unsafe_allow_html=True)
-        time.sleep(0.01)
-
-    uploaded = st.file_uploader("📸 사진 업로드", type=['jpg','png','jpeg'], key=f"up_v24")
+    uploaded = st.file_uploader("📸 사진 업로드", type=['jpg','png','jpeg'], key=f"up_v25")
 
     if st.sidebar.button("🔄 전체 초기화"):
         st.session_state.clear()
@@ -186,9 +167,10 @@ else:
         if 'current_img_name' not in st.session_state or st.session_state['current_img_name'] != uploaded.name:
             st.session_state['points'] = []; st.session_state['search_done'] = False
             st.session_state['current_img_name'] = uploaded.name
-            with st.spinner('📸 최적화 중...'):
+            with st.spinner('📸 고화질 처리 중...'):
                 raw = Image.open(uploaded).convert('RGB')
-                raw.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+                # 🚀 [고화질 상향] 기존 1200에서 1600으로 확대
+                raw.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
                 st.session_state['proc_img'] = raw
             st.rerun()
 
@@ -215,14 +197,17 @@ else:
 
         st.markdown("### 2️⃣ 영역 지정")
         
-        # 🚀 [UI 원복] 버튼식 크기 조절
-        scale_val = st.radio("🔍 보기 크기 (모바일은 축소 권장):", [0.3, 0.5, 0.7, 1.0], format_func=lambda x: f"{int(x*100)}%", index=3, horizontal=True)
+        # 🚀 [기본값 70% 설정] Radio 버튼 방식 유지
+        scale_val = st.radio("🔍 보기 크기 (모바일 조작 최적화):", [0.3, 0.5, 0.7, 1.0], format_func=lambda x: f"{int(x*100)}%", index=2, horizontal=True)
 
         c_ref, c_del, c_auto = st.columns([1, 1, 2])
         with c_ref: 
-            if st.button("🔄 이미지 안나옴"): st.rerun()
+            # 🚀 [새로고침 개선] 클릭 시 리프레시 카운트를 올려 컴포넌트 강제 갱신
+            if st.button("🔄 이미지 안나옴"):
+                st.session_state['refresh_count'] += 1
+                st.toast("이미지를 다시 불러옵니다...")
+                st.rerun()
         with c_del:
-            # 🚀 [버튼 원복] 점 지우기 버튼
             if st.button("❌ 점 지우기", type="secondary"):
                 st.session_state['points'] = []; st.rerun()
         with c_auto:
@@ -230,12 +215,12 @@ else:
                 w, h = working_img.size
                 st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]; st.rerun()
 
-        # 표시용 이미지
+        # 표시용 이미지 (스케일 반영)
         w, h = working_img.size
         d_img = working_img.resize((int(w * scale_val), int(h * scale_val)), Image.Resampling.LANCZOS)
         draw = ImageDraw.Draw(d_img)
         
-        # 🚀 [번호 복원] 포인트 번호 표시 (1,2,3,4)
+        # 포인트 번호 표시 유지
         for i, p in enumerate(st.session_state['points']):
             px, py = p[0] * scale_val, p[1] * scale_val
             draw.ellipse((px-8, py-8, px+8, py+8), fill='red', outline='white', width=2)
@@ -245,7 +230,9 @@ else:
             pts_s = [(p[0]*scale_val, p[1]*scale_val) for p in st.session_state['points']]
             draw.polygon([tuple(p) for p in order_points(np.array(pts_s))], outline='#00FF00', width=3)
 
-        value = streamlit_image_coordinates(d_img, key="click_pad")
+        # 🚀 [이미지 강제 렌더링] refresh_count를 키에 포함하여 버튼 클릭 시 무조건 다시 그리게 함
+        value = streamlit_image_coordinates(d_img, key=f"click_pad_{st.session_state['refresh_count']}")
+        
         if value:
             rx, ry = value['x'] / scale_val, value['y'] / scale_val
             if len(st.session_state['points']) < 4:
@@ -253,7 +240,7 @@ else:
                 if not st.session_state['points'] or st.session_state['points'][-1] != new_p:
                     st.session_state['points'].append(new_p); st.rerun()
 
-        # 🚀 [미리보기 원복] 선택된 분석 영역 미리보기
+        # 미리보기 영역 유지
         if len(st.session_state['points']) == 4:
             st.markdown("#### 🔍 분석 영역 미리보기")
             warped = four_point_transform(np.array(working_img), np.array(st.session_state['points'], dtype="float32"))
@@ -278,13 +265,11 @@ else:
                         fn = db_n[i]
                         info = master_map.get(get_digits(fn), {'formal': fn, 'name': '정보 없음'})
                         f_code = info['formal']
-                        
-                        # 🚀 [재고 로직 원복] strip().upper()로 키 대조
                         f_key = f_code.strip().upper()
                         qty = agg_stock.get(f_key, 0)
                         
                         u_row = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fn)]
-                        url = u_row['카카오톡_전송용_URL'].values[0] if not u_row.empty else None
+                        url = u_row['카카오톡_전송용_URL'].values[0] if not url_row.empty else None
                         
                         if url:
                             data = {'formal': f_code, 'name': info['name'], 'score': sims[i], 'stock': qty, 'url': url}
