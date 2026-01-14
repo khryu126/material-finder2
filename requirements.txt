@@ -1,4 +1,4 @@
-streamlit==1.25.0
+streamlit
 pandas
 numpy
 pillow
@@ -6,4 +6,4 @@ tensorflow-cpu
 scikit-learn
 requests
 opencv-python-headless
-streamlit-drawable-canvas
+streamlit-drawable-canvas>=0.9.3
