@@ -7,7 +7,7 @@ import os
 import requests
 import cv2
 import base64
-from PIL import Image, ImageEnhance, ImageDraw, ImageOps
+from PIL import Image, ImageEnhance, ImageDraw
 from io import BytesIO
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 from tensorflow.keras.preprocessing import image
@@ -15,7 +15,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from streamlit_image_coordinates import streamlit_image_coordinates
 
 # -----------------------------------------------------------
-# 🚑 [필수 패치] Streamlit 호환성 해결
+# 🚑 [필수 패치] Streamlit 호환성 해결 (흰 화면 방지)
 # -----------------------------------------------------------
 import streamlit.elements.image as st_image
 
@@ -29,7 +29,7 @@ if not hasattr(st_image, 'image_to_url'):
     st_image.image_to_url = local_image_to_url
 # -----------------------------------------------------------
 
-# --- [1] 유틸리티 ---
+# --- [1] 유틸리티 및 리소스 로드 ---
 def get_direct_url(url):
     if not url or str(url) == 'nan' or 'drive.google.com' not in url: return url
     if 'file/d/' in url: file_id = url.split('file/d/')[1].split('/')[0]
@@ -80,7 +80,7 @@ def get_master_map():
 
 master_map = get_master_map()
 
-# --- [2] 이미지 처리 (투영/보정) ---
+# --- [2] 이미지 처리 (투영 & 스마트 필터) ---
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
@@ -105,8 +105,8 @@ def four_point_transform(image, pts):
     warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
     return warped
 
-def apply_filters(img, lighting, surface, flooring_mode, brightness, sharpness):
-    # 조명 보정
+def apply_smart_filters(img, category, lighting, brightness, sharpness):
+    # 1. 조명 보정
     if lighting == '백열등 (누런 조명)':
         r, g, b = img.split()
         b = b.point(lambda i: i * 1.2)
@@ -115,26 +115,37 @@ def apply_filters(img, lighting, surface, flooring_mode, brightness, sharpness):
         r, g, b = img.split()
         r = r.point(lambda i: i * 1.1)
         img = Image.merge('RGB', (r, g, b))
-    
+
     enhancer_con = ImageEnhance.Contrast(img)
     enhancer_shp = ImageEnhance.Sharpness(img)
+    enhancer_bri = ImageEnhance.Brightness(img)
+    enhancer_col = ImageEnhance.Color(img)
 
-    if flooring_mode != '해당 없음':
+    # 2. 자재별 자동 보정 (사용자가 고른 카테고리 기반)
+    if category == '마루/우드 (Wood)':
+        # 나뭇결 강조: 선명도 대폭 증가, 대비 약간 증가
         img = enhancer_shp.enhance(2.0)
         img = enhancer_con.enhance(1.1)
-    else:
-        if surface == '하이그로시 (반사 심함)':
-            img = enhancer_con.enhance(1.5)
-        elif surface == '매트/엠보 (무광)':
-            img = enhancer_con.enhance(1.2)
-        if sharpness != 1.0:
-            img = enhancer_shp.enhance(sharpness)
+    elif category == '하이그로시/유광 (Glossy)':
+        # 빛반사 제거: 대비 대폭 증가 (반사광 날림)
+        img = enhancer_con.enhance(1.5)
+        img = enhancer_shp.enhance(1.2)
+    elif category == '벽지/패브릭 (Texture)':
+        # 질감 강조: 적당한 선명도
+        img = enhancer_shp.enhance(1.5)
+        img = enhancer_bri.enhance(1.1)
+    elif category == '석재/콘크리트 (Stone)':
+        # 색상 왜곡 방지: 채도 감소, 선명도 증가
+        img = enhancer_col.enhance(0.8)
+        img = enhancer_shp.enhance(1.5)
     
-    if brightness != 1.0:
-        img = ImageEnhance.Brightness(img).enhance(brightness)
+    # 3. 사용자 수동 미세 조정
+    if brightness != 1.0: img = enhancer_bri.enhance(brightness)
+    if sharpness != 1.0: img = enhancer_shp.enhance(sharpness)
+        
     return img
 
-def resize_image_for_speed(img, max_width=800):
+def resize_for_display(img, max_width=800):
     if img.width > max_width:
         w_percent = (max_width / float(img.width))
         h_size = int((float(img.height) * float(w_percent)))
@@ -146,135 +157,176 @@ st.set_page_config(layout="wide", page_title="스마트 자재 검색")
 st.title("🏭 스마트 자재 패턴 검색")
 st.sidebar.info(f"📅 재고 기준일: {stock_date}")
 
-# 세션 상태
+# --- 세션 상태 관리 ---
 if 'points' not in st.session_state: st.session_state['points'] = []
-if 'current_img' not in st.session_state: st.session_state['current_img'] = None
 if 'uploader_key' not in st.session_state: st.session_state['uploader_key'] = 0
+if 'search_done' not in st.session_state: st.session_state['search_done'] = False
 
+# --- 가이드라인 (Expander) ---
+with st.expander("📘 [필독] 사용 방법 및 옵션 가이드 (클릭)", expanded=False):
+    st.markdown("""
+    **1. 사진 촬영 및 업로드**
+    * 최대한 정면에서 찍으면 좋지만, **비스듬하게 서서 찍어도 괜찮습니다.** (4점 보정 기능이 펴줍니다!)
+    * **고화질 사진**도 자동으로 최적화되므로 그냥 업로드하세요.
+
+    **2. 자재 종류 선택 (중요 ⭐)**
+    * **마루/우드:** 나뭇결이 흐릿할 때 선택하세요. 선명도를 확 올려서 무늬를 잡아냅니다.
+    * **하이그로시:** 빛 반사가 심해서 하얗게 뜬 부분이 많을 때 선택하세요.
+    * **석재/콘크리트:** 돌 표면의 거친 질감을 찾을 때 유리합니다.
+
+    **3. 영역 지정 (4점 콕콕)**
+    * 마우스로 자재의 **모서리 4군데를 클릭**하세요.
+    * 4번째 점을 찍는 순간, 찌그러진 사진이 **네모 반듯하게** 펴집니다.
+    
+    **4. 검색 모드**
+    * **패턴 중심(흑백):** "색깔은 달라도 되니 무늬가 똑같은 걸 찾아줘!" (추천 👍)
+    * **컬러+패턴:** "색깔도 비슷해야 해!" (우드 톤 구분할 때)
+    """)
+
+# --- 업로더 및 초기화 ---
 uploaded = st.file_uploader("자재 이미지를 업로드하세요", type=['jpg', 'png', 'tif', 'jpeg'], key=f"up_{st.session_state['uploader_key']}")
 
-if st.sidebar.button("🔄 처음부터 다시 하기"):
+# 이미지 리셋 버튼
+if st.sidebar.button("🔄 처음부터 다시 하기 (Reset)"):
     st.session_state['points'] = []
-    st.session_state['current_img'] = None
+    st.session_state['search_done'] = False
+    st.session_state['search_results'] = None
     st.session_state['uploader_key'] += 1
     st.rerun()
 
 if uploaded:
-    if st.session_state['current_img'] is None or uploaded.name != st.session_state.get('last_filename'):
-        try:
-            raw = Image.open(uploaded).convert('RGB')
-            st.session_state['current_img'] = resize_image_for_speed(raw, max_width=800)
-            st.session_state['last_filename'] = uploaded.name
-            st.session_state['points'] = []
-        except:
-            st.error("이미지 로딩 실패")
-            st.stop()
-
-    working_img = st.session_state['current_img']
-
-    st.markdown("### 🛠️ 검색 설정 및 영역 지정")
-    
-    # [NEW] 검색 모드 추가
-    search_mode = st.radio(
-        "🔎 검색 기준 선택", 
-        ["🎨 컬러 + 패턴 종합 (기본)", "🦓 패턴/질감 중심 (색상 무시)"], 
-        horizontal=True,
-        help="조명 색이 너무 강하거나, 색상은 다르지만 무늬가 같은 자재를 찾을 때 '패턴 중심'을 선택하세요."
-    )
-
-    with st.expander("📸 상세 환경 설정 (조명/재질)", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            source_type = st.radio("원본 종류", ['사진 촬영본', '이미지 파일 (스캔/디지털)'])
-        with c2:
-            lighting = st.selectbox("조명 색상", ['일반/자연광', '백열등 (누런 조명)', '형광등 (푸른/녹색 조명)'], disabled=(source_type!='사진 촬영본'))
-        with c3:
-            surface = st.selectbox("표면 재질", ['일반', '하이그로시 (반사 심함)', '매트/엠보 (무광)'], disabled=(source_type!='사진 촬영본'))
-        with c4:
-            flooring_mode = st.selectbox("마루 모드", ['해당 없음', '일반 마루', '헤링본/쉐브론'], disabled=(source_type!='사진 촬영본'))
+    # 🧹 [자동 리셋] 새로운 파일이 들어오면 기존 결과/좌표 싹 지우기
+    if 'current_img_name' not in st.session_state or st.session_state['current_img_name'] != uploaded.name:
+        st.session_state['points'] = []
+        st.session_state['search_done'] = False
+        st.session_state['search_results'] = None
+        st.session_state['current_img_name'] = uploaded.name
         
-        c5, c6, c7 = st.columns(3)
-        with c5:
-            if st.button("↩️ 90도 회전"):
-                st.session_state['current_img'] = working_img.rotate(90, expand=True)
-                st.session_state['points'] = []
-                st.rerun()
-        with c6:
-            brightness = st.slider("💡 밝기", 0.5, 2.0, 1.0, 0.1) if source_type == '사진 촬영본' else 1.0
-        with c7:
-            sharpness = st.slider("🔪 선명도", 0.0, 3.0, 1.5, 0.1) if source_type == '사진 촬영본' else 1.0
+        # ⏳ [로딩 표시] 대용량 이미지 처리 중 사용자 안심시키기
+        with st.spinner('📸 고화질 이미지를 분석용으로 최적화하는 중입니다... 잠시만요!'):
+            try:
+                raw = Image.open(uploaded).convert('RGB')
+                st.session_state['proc_img'] = resize_for_display(raw, max_width=800)
+            except:
+                st.error("이미지를 처리할 수 없습니다.")
+                st.stop()
 
-    # 좌표 그리기
+    working_img = st.session_state['proc_img']
+
+    # --- 옵션 설정 UI ---
+    st.markdown("### 1️⃣ 환경 설정")
+    
+    col_opt1, col_opt2 = st.columns(2)
+    with col_opt1:
+        material_type = st.selectbox(
+            "🧱 자재 종류 (자동 필터)", 
+            ['일반 (기본)', '마루/우드 (Wood)', '하이그로시/유광 (Glossy)', '벽지/패브릭 (Texture)', '석재/콘크리트 (Stone)'],
+            help="자재 특성에 맞춰 AI가 더 잘 볼 수 있도록 이미지를 자동 보정합니다."
+        )
+    with col_opt2:
+        search_mode = st.radio(
+            "🔎 검색 기준", 
+            ["🎨 컬러 + 패턴 종합", "🦓 패턴/질감 중심 (색상 무시)"], 
+            horizontal=True,
+            help="조명 때문에 색이 이상하게 찍혔다면 '패턴 중심'을 선택하세요. 흑백으로 변환하여 무늬만 비교합니다."
+        )
+
+    with st.expander("⚙️ 고급 설정 (조명, 회전, 밝기)", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            lighting = st.selectbox("조명 색상", ['일반/자연광', '백열등 (누런 조명)', '형광등 (푸른/녹색 조명)'], help="현장 조명이 너무 노랗거나 푸르다면 선택하세요.")
+        with c2:
+            if st.button("↩️ 사진 90도 회전"):
+                st.session_state['proc_img'] = working_img.rotate(90, expand=True)
+                st.session_state['points'] = [] # 회전하면 좌표 초기화
+                st.rerun()
+        with c3:
+            brightness = st.slider("밝기 조절", 0.5, 2.0, 1.0, 0.1, help="사진이 너무 어두우면 밝게, 너무 밝으면 어둡게 조절하세요.")
+            sharpness = st.slider("선명도 조절", 0.0, 3.0, 1.5, 0.1, help="무늬가 흐릿하면 선명도를 높이세요.")
+
+    # --- 좌표 찍기 ---
+    st.markdown("### 2️⃣ 영역 지정 (4점 클릭)")
+    st.info(f"👇 이미지에서 분석할 자재의 **모서리 4곳을 클릭**해주세요. ({len(st.session_state['points'])}/4 완료)")
+    
     draw_img = working_img.copy()
     draw = ImageDraw.Draw(draw_img)
-    for p in st.session_state['points']:
-        draw.ellipse((p[0]-10, p[1]-10, p[0]+10, p[1]+10), fill='red', outline='white')
     
+    # 점 그리기
+    for i, p in enumerate(st.session_state['points']):
+        draw.ellipse((p[0]-8, p[1]-8, p[0]+8, p[1]+8), fill='red', outline='white', width=2)
+        draw.text((p[0]+10, p[1]-10), str(i+1), fill='red')
+
+    # 4점 완성 시 선 그리기
     if len(st.session_state['points']) == 4:
         pts = np.array(st.session_state['points'])
         rect = order_points(pts)
-        draw.polygon([tuple(p) for p in rect], outline='red', width=5)
+        draw.polygon([tuple(p) for p in rect], outline='#00FF00', width=4)
 
-    st.info(f"👇 **자재의 모서리 4곳을 클릭하세요.** ({len(st.session_state['points'])}/4 완료)")
-    
-    value = streamlit_image_coordinates(draw_img, key="pilot")
+    # 인터랙티브 이미지
+    value = streamlit_image_coordinates(draw_img, key="click_pad")
 
     if value is not None:
-        point = (value['x'], value['y'])
-        if not st.session_state['points'] or st.session_state['points'][-1] != point:
-            if len(st.session_state['points']) < 4:
-                st.session_state['points'].append(point)
+        new_point = (value['x'], value['y'])
+        if len(st.session_state['points']) < 4:
+            if not st.session_state['points'] or st.session_state['points'][-1] != new_point:
+                st.session_state['points'].append(new_point)
                 st.rerun()
 
-    if len(st.session_state['points']) > 0:
-        if st.button("❌ 점 다시 찍기"):
+    if len(st.session_state['points']) > 0 and len(st.session_state['points']) < 4:
+        if st.button("❌ 점 취소하고 다시 찍기"):
             st.session_state['points'] = []
             st.rerun()
 
-    # 분석 시작
+    # --- 분석 및 결과 ---
     if len(st.session_state['points']) == 4:
+        st.markdown("### 3️⃣ 분석 결과")
+        
         pts = np.array(st.session_state['points'], dtype="float32")
         cv_img = np.array(working_img)
         warped = four_point_transform(cv_img, pts)
         
         final_img = Image.fromarray(warped)
-        if source_type == '사진 촬영본':
-            final_img = apply_filters(final_img, lighting, surface, flooring_mode, brightness, sharpness)
         
-        # [NEW] 패턴 중심 모드일 경우 흑백 변환 (색상 정보 제거)
+        # [스마트 필터 적용]
+        final_img = apply_smart_filters(final_img, material_type, lighting, brightness, sharpness)
+        
+        # [패턴 모드일 경우 흑백 변환]
         if search_mode == "🦓 패턴/질감 중심 (색상 무시)":
             final_img = final_img.convert("L").convert("RGB")
-            st.caption("ℹ️ 색상을 제거하고 텍스처 위주로 분석합니다.")
 
-        st.success("✅ 준비 완료!")
-        st.image(final_img, caption="AI가 분석할 이미지", width=300)
-
-        if st.button("🔍 검색 시작", type="primary"):
-            with st.spinner('AI 분석 중...'):
-                x = image.img_to_array(final_img.resize((224, 224)))
-                x = np.expand_dims(x, axis=0)
-                query_vec = model.predict(preprocess_input(x), verbose=0).flatten().reshape(1, -1)
-                
-                db_names, db_vecs = list(feature_db.keys()), np.array(list(feature_db.values()))
-                sims = cosine_similarity(query_vec, db_vecs).flatten()
-                
-                results = []
-                for i in range(len(db_names)):
-                    fname = db_names[i]
-                    info = master_map.get(get_digits(fname), {'formal': fname, 'name': '정보 없음'})
-                    formal = info['formal']
-                    qty = agg_stock.get(formal.strip().upper(), 0)
+        col_prev1, col_prev2 = st.columns(2)
+        with col_prev1: 
+            st.image(final_img, caption="AI가 분석할 최종 이미지", width=300)
+        with col_prev2:
+            st.write("👉 이미지가 잘 펴졌나요?")
+            if st.button("🔍 이대로 검색 시작", type="primary"):
+                with st.spinner('AI가 데이터베이스를 뒤지는 중입니다...'):
+                    x = image.img_to_array(final_img.resize((224, 224)))
+                    x = np.expand_dims(x, axis=0)
+                    query_vec = model.predict(preprocess_input(x), verbose=0).flatten().reshape(1, -1)
                     
-                    url_row = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fname)]
-                    if url_row.empty: url_row = df_path[df_path['파일명'] == fname]
-                    url = url_row['카카오톡_전송용_URL'].values[0] if not url_row.empty else None
+                    db_names, db_vecs = list(feature_db.keys()), np.array(list(feature_db.values()))
+                    sims = cosine_similarity(query_vec, db_vecs).flatten()
                     
-                    results.append({'formal': formal, 'name': info['name'], 'score': sims[i], 'stock': qty, 'url': url})
-                
-                results = sorted(results, key=lambda x: x['score'], reverse=True)
-                st.session_state['search_results'] = results
-                st.session_state['search_done'] = True
+                    results = []
+                    for i in range(len(db_names)):
+                        fname = db_names[i]
+                        info = master_map.get(get_digits(fname), {'formal': fname, 'name': '정보 없음'})
+                        formal = info['formal']
+                        qty = agg_stock.get(formal.strip().upper(), 0)
+                        
+                        url_row = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fname)]
+                        if url_row.empty: url_row = df_path[df_path['파일명'] == fname]
+                        url = url_row['카카오톡_전송용_URL'].values[0] if not url_row.empty else None
+                        
+                        results.append({'formal': formal, 'name': info['name'], 'score': sims[i], 'stock': qty, 'url': url})
+                    
+                    results = sorted(results, key=lambda x: x['score'], reverse=True)
+                    st.session_state['search_results'] = results
+                    st.session_state['search_done'] = True
+                    st.rerun() # 결과창 바로 띄우기 위해 리런
 
+    # 결과 표시
     if st.session_state.get('search_done'):
         st.markdown("---")
         results = st.session_state['search_results']
