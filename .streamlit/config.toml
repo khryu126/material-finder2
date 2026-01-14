@@ -1,0 +1,6 @@
+[server]
+wsPingTimeout = 60000
+maxUploadSize = 100
+
+[browser]
+gatherUsageStats = false
