@@ -11,9 +11,9 @@ from io import BytesIO
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 from tensorflow.keras.preprocessing import image
 from sklearn.metrics.pairwise import cosine_similarity
-from streamlit_image_coordinates import streamlit_image_coordinates # 가볍고 확실한 좌표 라이브러리
+from streamlit_image_coordinates import streamlit_image_coordinates
 
-# --- [1] 기본 유틸리티 함수 ---
+# --- [1] 기본 유틸리티 ---
 def get_direct_url(url):
     if not url or str(url) == 'nan' or 'drive.google.com' not in url: return url
     if 'file/d/' in url: file_id = url.split('file/d/')[1].split('/')[0]
@@ -64,7 +64,7 @@ def get_master_map():
 
 master_map = get_master_map()
 
-# --- [2] 투영 변환 로직 (좌표 4개 받아서 펴기) ---
+# --- [2] 이미지 처리 (투영/보정) ---
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
@@ -90,7 +90,6 @@ def four_point_transform(image, pts):
     return warped
 
 def apply_filters(img, lighting, surface, flooring_mode, brightness, sharpness):
-    # 조명
     if lighting == '백열등 (누런 조명)':
         r, g, b = img.split()
         b = b.point(lambda i: i * 1.2)
@@ -103,7 +102,6 @@ def apply_filters(img, lighting, surface, flooring_mode, brightness, sharpness):
     enhancer_con = ImageEnhance.Contrast(img)
     enhancer_shp = ImageEnhance.Sharpness(img)
 
-    # 재질/마루
     if flooring_mode != '해당 없음':
         img = enhancer_shp.enhance(2.0)
         img = enhancer_con.enhance(1.1)
@@ -115,41 +113,57 @@ def apply_filters(img, lighting, surface, flooring_mode, brightness, sharpness):
         if sharpness != 1.0:
             img = enhancer_shp.enhance(sharpness)
     
-    # 밝기
     if brightness != 1.0:
         img = ImageEnhance.Brightness(img).enhance(brightness)
-        
     return img
 
-# --- [3] UI 구성 ---
+# 🚀 [속도 최적화] 이미지 리사이징 함수
+def resize_image_for_speed(img, max_width=800):
+    """이미지 가로폭을 max_width로 줄여서 속도를 높임"""
+    if img.width > max_width:
+        w_percent = (max_width / float(img.width))
+        h_size = int((float(img.height) * float(w_percent)))
+        return img.resize((max_width, h_size), Image.Resampling.LANCZOS)
+    return img
+
+# --- [3] 메인 UI ---
 st.set_page_config(layout="wide", page_title="스마트 자재 검색")
-st.title("🏭 스마트 자재 패턴 검색 (4점 클릭)")
+st.title("🏭 스마트 자재 패턴 검색 (Fast Mode)")
 st.sidebar.info(f"📅 재고 기준일: {stock_date}")
 
-# 세션 상태 초기화 (클릭 좌표 저장용)
-if 'points' not in st.session_state:
-    st.session_state['points'] = []
-if 'uploader_key' not in st.session_state:
-    st.session_state['uploader_key'] = 0
+# 세션 상태 초기화
+if 'points' not in st.session_state: st.session_state['points'] = []
+if 'current_img' not in st.session_state: st.session_state['current_img'] = None
+if 'uploader_key' not in st.session_state: st.session_state['uploader_key'] = 0
 
-# 이미지 업로더 (키를 바꿔서 강제 리셋 가능하게 함)
-uploaded = st.file_uploader("자재 이미지를 업로드하세요", type=['jpg', 'png', 'tif', 'jpeg'], key=f"uploader_{st.session_state['uploader_key']}")
+# 파일 업로더
+uploaded = st.file_uploader("자재 이미지를 업로드하세요", type=['jpg', 'png', 'tif', 'jpeg'], key=f"up_{st.session_state['uploader_key']}")
 
-# 이미지 리셋 버튼
-if st.sidebar.button("🔄 이미지/좌표 초기화"):
+# 초기화 버튼
+if st.sidebar.button("🔄 처음부터 다시 하기"):
     st.session_state['points'] = []
-    st.session_state['uploader_key'] += 1 # 업로더 초기화
+    st.session_state['current_img'] = None
+    st.session_state['uploader_key'] += 1
     st.rerun()
 
 if uploaded:
-    # 이미지가 바뀌면 좌표 초기화
-    if 'last_uploaded' not in st.session_state or st.session_state['last_uploaded'] != uploaded.name:
-        st.session_state['points'] = []
-        st.session_state['last_uploaded'] = uploaded.name
+    # 🚀 [핵심] 이미지를 한 번만 로드하고 리사이징해서 세션에 저장 (속도 향상)
+    if st.session_state['current_img'] is None or uploaded.name != st.session_state.get('last_filename'):
+        try:
+            raw = Image.open(uploaded).convert('RGB')
+            # 여기서 바로 800px로 줄여버림 -> 로딩 속도 10배 빨라짐
+            st.session_state['current_img'] = resize_image_for_speed(raw, max_width=800)
+            st.session_state['last_filename'] = uploaded.name
+            st.session_state['points'] = [] # 새 이미지면 점 초기화
+        except:
+            st.error("이미지 로딩 실패")
+            st.stop()
 
-    st.markdown("### 🛠️ 촬영 환경 및 영역 지정")
-    
-    with st.expander("📸 환경 설정 (조명/재질 등)", expanded=True):
+    # 작업용 이미지는 세션에서 가져옴
+    working_img = st.session_state['current_img']
+
+    st.markdown("### 🛠️ 환경 설정 & 영역 지정")
+    with st.expander("📸 촬영 환경 설정", expanded=True):
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             source_type = st.radio("원본 종류", ['사진 촬영본', '이미지 파일 (스캔/디지털)'])
@@ -159,87 +173,61 @@ if uploaded:
             surface = st.selectbox("표면 재질", ['일반', '하이그로시 (반사 심함)', '매트/엠보 (무광)'], disabled=(source_type!='사진 촬영본'))
         with c4:
             flooring_mode = st.selectbox("마루 모드", ['해당 없음', '일반 마루', '헤링본/쉐브론'], disabled=(source_type!='사진 촬영본'))
-
+        
         c5, c6, c7 = st.columns(3)
         with c5:
-            # 회전: 캔버스가 아니므로 즉시 적용해서 보여줌
-            rotation = st.radio("사진 회전", [0, 90, 180, 270], horizontal=True, format_func=lambda x: f"↩️ {x}도" if x else "원본")
+            # 회전은 버튼 누를 때마다 세션 이미지를 돌림
+            if st.button("↩️ 90도 회전"):
+                st.session_state['current_img'] = working_img.rotate(90, expand=True)
+                st.session_state['points'] = [] # 회전하면 좌표 초기화
+                st.rerun()
         with c6:
             brightness = st.slider("💡 밝기", 0.5, 2.0, 1.0, 0.1) if source_type == '사진 촬영본' else 1.0
         with c7:
             sharpness = st.slider("🔪 선명도", 0.0, 3.0, 1.5, 0.1) if source_type == '사진 촬영본' else 1.0
 
-    # 1. 원본 이미지 로드 및 전처리 (회전만 적용)
-    try:
-        raw_img = Image.open(uploaded).convert('RGB')
-        if rotation != 0:
-            raw_img = raw_img.rotate(-rotation, expand=True)
-    except:
-        st.error("이미지 로딩 실패")
-        st.stop()
-
-    # 2. 화면 표시용 리사이징
-    # (너무 크면 좌표 클릭이 불편하므로 너비 600px로 고정)
-    disp_width = 600
-    w_percent = (disp_width / float(raw_img.size[0]))
-    disp_height = int((float(raw_img.size[1]) * float(w_percent)))
-    disp_img = raw_img.resize((disp_width, disp_height))
-
-    # 3. 클릭된 점 그리기 (시각적 피드백)
-    # disp_img 위에 빨간 점을 그려서 보여줍니다.
-    draw_img = disp_img.copy()
+    # 좌표 그리기 준비
+    draw_img = working_img.copy()
     draw = ImageDraw.Draw(draw_img)
     for p in st.session_state['points']:
-        # 반지름 5px 빨간 원
-        draw.ellipse((p[0]-5, p[1]-5, p[0]+5, p[1]+5), fill='red', outline='white')
-        
-    # 점 4개가 되면 선으로 이어줌 (사각형 미리보기)
+        draw.ellipse((p[0]-10, p[1]-10, p[0]+10, p[1]+10), fill='red', outline='white')
+    
     if len(st.session_state['points']) == 4:
         pts = np.array(st.session_state['points'])
-        # 순서 정렬 (좌상, 우상, 우하, 좌하)
         rect = order_points(pts)
-        draw.polygon([tuple(p) for p in rect], outline='red', width=3)
+        draw.polygon([tuple(p) for p in rect], outline='red', width=5)
 
-    # 4. 좌표 입력 컴포넌트 (이미지 클릭 감지)
     st.info(f"👇 **자재의 모서리 4곳을 클릭하세요.** ({len(st.session_state['points'])}/4 완료)")
     
-    # 여기서 클릭하면 좌표가 반환됩니다.
+    # 좌표 입력 컴포넌트
     value = streamlit_image_coordinates(draw_img, key="pilot")
 
-    # 클릭 이벤트 처리
     if value is not None:
         point = (value['x'], value['y'])
-        # 중복 클릭 방지 (같은 위치 연속 클릭 무시)
         if not st.session_state['points'] or st.session_state['points'][-1] != point:
             if len(st.session_state['points']) < 4:
                 st.session_state['points'].append(point)
-                st.rerun() # 점 찍었으니 화면 갱신해서 빨간 점 보여주기
+                st.rerun()
 
-    # 좌표 초기화 버튼 (잘못 찍었을 때)
     if len(st.session_state['points']) > 0:
         if st.button("❌ 점 다시 찍기"):
             st.session_state['points'] = []
             st.rerun()
 
-    # 5. 분석 시작 (4점 완료 시)
+    # 분석 시작
     if len(st.session_state['points']) == 4:
-        # 화면 좌표(600px 기준)를 원본 이미지 비율로 변환
-        ratio = raw_img.size[0] / disp_width
-        original_pts = np.array(st.session_state['points'], dtype="float32") * ratio
+        pts = np.array(st.session_state['points'], dtype="float32")
+        cv_img = np.array(working_img)
+        warped = four_point_transform(cv_img, pts)
         
-        # 투영 변환 수행
-        cv_img = np.array(raw_img)
-        warped = four_point_transform(cv_img, original_pts)
         final_img = Image.fromarray(warped)
-        
-        # 필터 적용
         if source_type == '사진 촬영본':
             final_img = apply_filters(final_img, lighting, surface, flooring_mode, brightness, sharpness)
         
-        st.success("✅ 영역 지정 완료! 아래 변환된 이미지를 확인하세요.")
-        st.image(final_img, caption="최종 분석 이미지 (쫙 펴짐!)", width=300)
+        st.success("✅ 변환 완료! 아래 이미지가 분석에 사용됩니다.")
+        st.image(final_img, caption="최종 분석 이미지 (보정됨)", width=300)
 
-        if st.button("🔍 이 이미지로 검색 시작", type="primary"):
+        if st.button("🔍 검색 시작", type="primary"):
             with st.spinner('AI 분석 중...'):
                 x = image.img_to_array(final_img.resize((224, 224)))
                 x = np.expand_dims(x, axis=0)
@@ -265,7 +253,6 @@ if uploaded:
                 st.session_state['search_results'] = results
                 st.session_state['search_done'] = True
 
-    # 6. 결과 출력
     if st.session_state.get('search_done'):
         st.markdown("---")
         results = st.session_state['search_results']
