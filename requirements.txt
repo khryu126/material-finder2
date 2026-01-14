@@ -6,4 +6,4 @@ tensorflow-cpu
 scikit-learn
 requests
 opencv-python-headless
-streamlit-cropper
+streamlit-image-coordinates
