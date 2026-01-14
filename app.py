@@ -7,7 +7,7 @@ import os
 import requests
 import cv2
 import base64
-from PIL import Image, ImageEnhance, ImageDraw, ImageFilter
+from PIL import Image, ImageEnhance, ImageDraw, ImageFilter, ImageOps
 from io import BytesIO
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 from tensorflow.keras.preprocessing import image
@@ -94,6 +94,26 @@ def get_master_map():
 
 master_map = get_master_map()
 
+# 🚀 [NEW] 색상 정밀 비교 함수 (히스토그램 비교)
+def calculate_color_similarity(img1_pil, img2_pil):
+    try:
+        # OpenCV 포맷으로 변환
+        img1 = cv2.cvtColor(np.array(img1_pil), cv2.COLOR_RGB2HSV)
+        img2 = cv2.cvtColor(np.array(img2_pil), cv2.COLOR_RGB2HSV)
+        
+        # 히스토그램 계산 (Hue, Saturation)
+        hist1 = cv2.calcHist([img1], [0, 1], None, [180, 256], [0, 180, 0, 256])
+        cv2.normalize(hist1, hist1, 0, 1, cv2.NORM_MINMAX)
+        
+        hist2 = cv2.calcHist([img2], [0, 1], None, [180, 256], [0, 180, 0, 256])
+        cv2.normalize(hist2, hist2, 0, 1, cv2.NORM_MINMAX)
+        
+        # 유사도 비교 (Correlation) -> 1에 가까울수록 색감이 동일함
+        score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+        return max(0, score) # 음수 방지
+    except:
+        return 0
+
 # --- [2] 이미지 처리 ---
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
@@ -171,15 +191,10 @@ if 'input_source' not in st.session_state: st.session_state['input_source'] = No
 
 with st.expander("📘 [필독] 사용 방법 (클릭)", expanded=False):
     st.markdown("""
-    1. **사진 입력:** 파일 업로드 또는 카메라 촬영을 선택하세요.
-    2. **자재 종류:** 마루, 타일 등 특성을 고르면 인식이 더 잘 됩니다.
-    3. **영역 지정:**
-       - **줌(Zoom):** 이미지가 너무 크면 슬라이더로 조절하세요.
-       - **4점 클릭:** 모서리 4개를 찍으면 삐뚤어진 사진을 펴줍니다.
-    4. **검색 기준:**
-       - **컬러+패턴:** 색상과 무늬 모두 중요할 때 (기본)
-       - **패턴 중심:** 조명이 안 좋아서 무늬만 보고 싶을 때 (흑백)
-       - **컬러 중심:** 무늬는 무시하고 색감만 비슷하면 될 때 (블러)
+    1. **사진 입력:** 파일 업로드 또는 카메라 촬영
+    2. **자재 종류:** 마루, 타일 등 특성 선택
+    3. **영역 지정:** 줌 슬라이더로 조절 후 모서리 4개 클릭
+    4. **검색 기준:** '컬러+패턴' 권장 (색상 검증 로직이 추가되었습니다!)
     """)
 
 tab1, tab2 = st.tabs(["📂 파일 업로드", "📸 카메라 촬영"])
@@ -236,7 +251,6 @@ if input_file:
 
         st.markdown("### 1️⃣ 환경 설정")
         
-        default_idx = 0 if active_source == "camera" else 1
         source_type = st.radio("📂 원본 종류", ['📸 현장 촬영 사진', '💻 이미지 파일 (스캔/디지털)'], index=0, horizontal=True)
         is_photo = (source_type == '📸 현장 촬영 사진')
 
@@ -251,8 +265,7 @@ if input_file:
             search_mode = st.radio(
                 "🔎 검색 기준", 
                 ["🎨 컬러 + 패턴 (기본)", "🦓 패턴/질감 중심 (흑백)", "🎨 컬러/톤 중심 (패턴 뭉개기)"], 
-                horizontal=True,
-                help="'컬러 중심'은 이미지를 흐리게 만들어 패턴을 무시하고 색감만 비교합니다."
+                horizontal=True
             )
 
         with st.expander("⚙️ 고급 설정 (조명, 회전, 밝기)", expanded=False):
@@ -270,7 +283,6 @@ if input_file:
                 sharpness = st.slider("선명도", 0.0, 3.0, 1.5, 0.1, disabled=not is_photo)
 
         st.markdown("### 2️⃣ 영역 지정")
-        
         zoom_level = st.slider("🔍 이미지 확대/축소", 300, 1500, 600, 50)
         display_img = resize_for_display(working_raw, max_width=zoom_level)
 
@@ -314,7 +326,6 @@ if input_file:
             
             ratio = working_raw.width / display_img.width
             original_pts = np.array(st.session_state['points'], dtype="float32") * ratio
-            
             cv_img = np.array(working_raw)
             warped = four_point_transform(cv_img, original_pts)
             final_img = Image.fromarray(warped)
@@ -329,13 +340,10 @@ if input_file:
                 proc_img_for_ai = final_img.filter(ImageFilter.GaussianBlur(radius=10))
 
             col_p1, col_p2 = st.columns(2)
-            with col_p1: st.image(final_img, caption="최종 자재 이미지", width=300)
+            with col_p1: st.image(final_img, caption="최종 이미지", width=300)
             with col_p2:
-                if search_mode == "🎨 컬러/톤 중심 (패턴 뭉개기)":
-                     st.image(proc_img_for_ai, caption="AI 분석용 (색감만 추출)", width=300)
-                
                 if st.button("🔍 검색 시작", type="primary"):
-                    with st.spinner('유사한 자재 찾는 중...'):
+                    with st.spinner('1차: AI 패턴 분석 중...'):
                         x = image.img_to_array(proc_img_for_ai.resize((224, 224)))
                         x = np.expand_dims(x, axis=0)
                         query_vec = model.predict(preprocess_input(x), verbose=0).flatten().reshape(1, -1)
@@ -343,12 +351,35 @@ if input_file:
                         db_names, db_vecs = list(feature_db.keys()), np.array(list(feature_db.values()))
                         sims = cosine_similarity(query_vec, db_vecs).flatten()
                         
-                        # 🚀 [핵심] 중복 제거를 위한 로직
+                        # 1차 필터링: 점수 높은 상위 30개 후보 추출
+                        top_indices = sims.argsort()[-30:][::-1]
+                        
                         raw_results = []
-                        for i in range(len(db_names)):
-                            fname = db_names[i]
-                            target_digits = extract_digits(fname)
+                        progress_bar = st.progress(0, text="2차: 정밀 색상 검증 중...")
+                        
+                        # 2차: 상위 후보들에 대해 색상 검증 (Reranking)
+                        for idx_i, idx in enumerate(top_indices):
+                            progress_bar.progress((idx_i + 1) / 30)
                             
+                            fname = db_names[idx]
+                            ai_score = sims[idx]
+                            
+                            # 색상 비교를 위해 로컬 파일 로드
+                            color_score = 0
+                            try:
+                                # 로컬에 파일이 있으면 로드해서 비교
+                                if os.path.exists(fname):
+                                    db_img = Image.open(fname).convert('RGB')
+                                    color_score = calculate_color_similarity(final_img, db_img)
+                                else:
+                                    color_score = 0.5 # 파일 없으면 중간값
+                            except:
+                                color_score = 0.5
+
+                            # [최종 점수] AI 점수(패턴) 70% + 색상 점수 30% 반영
+                            final_score = (ai_score * 0.7) + (color_score * 0.3)
+                            
+                            target_digits = extract_digits(fname)
                             info = master_map.get(target_digits)
                             if not info:
                                 clean_name = os.path.splitext(fname)[0]
@@ -358,7 +389,6 @@ if input_file:
 
                             formal = info['formal']
                             lab_no = info.get('lab_no', '-')
-                            
                             stock_key = extract_digits(formal)
                             if not stock_key: stock_key = str(formal).strip().upper()
                             qty = agg_stock.get(stock_key, 0)
@@ -366,24 +396,18 @@ if input_file:
                             url_match = df_path[df_path['추출된_품번'].apply(extract_digits) == target_digits]
                             url = url_match.iloc[0]['카카오톡_전송용_URL'] if not url_match.empty else None
                             
-                            # 점수와 함께 저장
-                            raw_results.append({'formal': formal, 'name': info['name'], 'lab_no': lab_no, 'score': sims[i], 'stock': qty, 'url': url})
+                            raw_results.append({'formal': formal, 'name': info['name'], 'lab_no': lab_no, 'score': final_score, 'stock': qty, 'url': url})
                         
-                        # 1. 점수순 정렬
+                        progress_bar.empty()
+                        
+                        # 정렬 및 중복 제거
                         raw_results.sort(key=lambda x: x['score'], reverse=True)
-                        
-                        # 2. 중복 제거 (이미 나온 품번은 건너뜀)
                         seen_codes = set()
                         unique_results = []
-                        
                         for res in raw_results:
-                            # 식별자: 정식품번 + (Lab No가 다르면 별도 취급)
-                            # 보통은 formal 코드로 묶으면 됨
-                            code_id = res['formal']
-                            
-                            if code_id not in seen_codes:
+                            if res['formal'] not in seen_codes:
                                 unique_results.append(res)
-                                seen_codes.add(code_id)
+                                seen_codes.add(res['formal'])
                         
                         st.session_state['search_results'] = unique_results
                         st.session_state['search_done'] = True
@@ -396,10 +420,9 @@ if input_file:
                 title_text = f"{idx}. {item['formal']}"
                 if item['lab_no'] != '-' and item['lab_no'] != item['formal']:
                     title_text += f" (Lab: {item['lab_no']})"
-                    
                 st.markdown(f"**{title_text}**")
                 st.write(f"{item['name']}")
-                st.caption(f"유사도: {item['score']:.1%}")
+                st.caption(f"적합도: {item['score']:.1%}") # 용어 변경: 유사도 -> 적합도 (색상포함이라)
                 if item['url']:
                     st.markdown(f"🔗 [**고화질 원본**]({item['url']})")
                     with st.expander("🖼️ 펼치기", expanded=False):
