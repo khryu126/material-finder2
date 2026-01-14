@@ -29,7 +29,7 @@ if not hasattr(st_image, 'image_to_url'):
     st_image.image_to_url = local_image_to_url
 # -----------------------------------------------------------
 
-# --- [1] 유틸리티 및 리소스 ---
+# --- [1] 유틸리티 및 데이터 로드 ---
 def get_direct_url(url):
     if not url or str(url) == 'nan' or 'drive.google.com' not in url: return url
     if 'file/d/' in url: file_id = url.split('file/d/')[1].split('/')[0]
@@ -46,6 +46,16 @@ def load_csv_smart(target_name):
                 except: continue
     st.error(f"❌ {target_name} 파일을 찾을 수 없습니다.")
     st.stop()
+
+def get_digits(text):
+    """문자열에서 숫자만 추출"""
+    return "".join(re.findall(r'\d+', str(text))) if text else ""
+
+def clean_filename(fname):
+    """파일명에서 확장자와 뒤에 붙은 식별자(_1, (1) 등)를 제거"""
+    name = os.path.splitext(fname)[0] # 확장자 제거 (L215536.jpeg -> L215536)
+    name = re.split(r'[_\(\)]', name)[0] # _, (, ) 기준으로 자르고 앞부분만 가져옴
+    return name
 
 @st.cache_resource
 def init_resources():
@@ -65,22 +75,34 @@ def init_resources():
 
 model, feature_db, df_path, df_info, agg_stock, stock_date = init_resources()
 
-def get_digits(text):
-    return "".join(re.findall(r'\d+', str(text))) if text else ""
-
+# 🧠 [핵심] 매핑 테이블 생성 (개선됨)
 @st.cache_data
 def get_master_map():
     mapping = {}
     for _, row in df_info.iterrows():
-        f, l, n = str(row['상품코드']).strip(), str(row['Lab No']).strip(), str(row['상품명']).strip()
-        val = {'formal': f, 'name': n}
+        f = str(row['상품코드']).strip()
+        l = str(row['Lab No']).strip()
+        n = str(row['상품명']).strip()
+        
+        if f.lower() == 'nan': f = ''
+        if l.lower() == 'nan': l = ''
+        if n.lower() == 'nan': n = ''
+
+        val = {'formal': f if f else l, 'name': n} # 정식코드가 없으면 Lab No를 정식코드로 사용
+        
+        # 1. 숫자만 추출해서 키로 등록 (가장 강력)
         if get_digits(l): mapping[get_digits(l)] = val
         if get_digits(f): mapping[get_digits(f)] = val
+        
+        # 2. 원본 문자열도 키로 등록 (보조)
+        if l: mapping[l] = val
+        if f: mapping[f] = val
+        
     return mapping
 
 master_map = get_master_map()
 
-# --- [2] 이미지 처리 ---
+# --- [2] 이미지 처리 (투영/필터/리사이즈) ---
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
@@ -106,6 +128,7 @@ def four_point_transform(image, pts):
     return warped
 
 def apply_smart_filters(img, category, lighting, brightness, sharpness):
+    # 1. 조명 보정
     if lighting == '백열등 (누런 조명)':
         r, g, b = img.split()
         b = b.point(lambda i: i * 1.2)
@@ -120,6 +143,7 @@ def apply_smart_filters(img, category, lighting, brightness, sharpness):
     enhancer_bri = ImageEnhance.Brightness(img)
     enhancer_col = ImageEnhance.Color(img)
 
+    # 2. 자재별 필터
     if category == '마루/우드 (Wood)':
         img = enhancer_shp.enhance(2.0)
         img = enhancer_con.enhance(1.1)
@@ -133,6 +157,7 @@ def apply_smart_filters(img, category, lighting, brightness, sharpness):
         img = enhancer_col.enhance(0.8)
         img = enhancer_shp.enhance(1.5)
     
+    # 3. 수동 보정
     if brightness != 1.0: img = enhancer_bri.enhance(brightness)
     if sharpness != 1.0: img = enhancer_shp.enhance(sharpness)
         
@@ -157,9 +182,10 @@ if 'search_done' not in st.session_state: st.session_state['search_done'] = Fals
 # 가이드
 with st.expander("📘 [필독] 사용 방법 (클릭)", expanded=False):
     st.markdown("""
-    1. **원본 종류 선택:** 현장 사진인지, 디지털 파일인지 선택하세요. (디지털 파일은 '전체 선택' 추천)
+    1. **원본 종류 선택:** 현장 사진인지, 스캔 파일인지 선택 (스캔 파일은 '전체 선택' 추천)
     2. **자재 종류:** 마루, 타일 등 특성을 고르면 인식이 더 잘 됩니다.
-    3. **영역 지정:** - **[전체 선택] 버튼:** 이미지가 반듯하다면 한 번에 선택!
+    3. **영역 지정:**
+       - **[전체 선택] 버튼:** 이미지가 반듯하다면 한 번에 선택!
        - **4점 클릭:** 삐뚤어진 사진은 모서리 4개를 찍어서 펴주세요.
     4. **검색:** '검색 시작' 버튼 클릭!
     """)
@@ -174,6 +200,7 @@ if st.sidebar.button("🔄 처음부터 다시 하기 (Reset)"):
     st.rerun()
 
 if uploaded:
+    # 이미지 로드 & 리셋
     if 'current_img_name' not in st.session_state or st.session_state['current_img_name'] != uploaded.name:
         st.session_state['points'] = []
         st.session_state['search_done'] = False
@@ -221,15 +248,12 @@ if uploaded:
 
     # --- [2] 영역 지정 ---
     st.markdown("### 2️⃣ 영역 지정")
-    
-    # 🌟 [NEW] 전체 선택 버튼 (디지털 파일용)
     col_sel1, col_sel2 = st.columns([3, 2])
     with col_sel1:
         st.info(f"👇 **모서리 4곳을 클릭**하거나 **전체 선택**을 누르세요. ({len(st.session_state['points'])}/4)")
     with col_sel2:
-        if st.button("⏹️ 이미지 전체 선택 (Auto)", type="primary", help="이미지 전체를 분석 영역으로 잡습니다. (스캔 파일용)"):
+        if st.button("⏹️ 이미지 전체 선택 (Auto)", type="primary"):
             w, h = working_img.size
-            # 전체 4점 좌표 자동 생성
             st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]
             st.rerun()
 
@@ -276,7 +300,7 @@ if uploaded:
             final_img = final_img.convert("L").convert("RGB")
 
         col_p1, col_p2 = st.columns(2)
-        with col_p1: st.image(final_img, caption="최종 분석 이미지", width=300)
+        with col_p1: st.image(final_img, caption="분석용 이미지", width=300)
         with col_p2:
             st.write("👉 분석할 영역이 맞나요?")
             if st.button("🔍 검색 시작", type="primary"):
@@ -291,13 +315,38 @@ if uploaded:
                     results = []
                     for i in range(len(db_names)):
                         fname = db_names[i]
-                        info = master_map.get(get_digits(fname), {'formal': fname, 'name': '정보 없음'})
-                        formal = info['formal']
-                        qty = agg_stock.get(formal.strip().upper(), 0)
                         
-                        url_row = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fname)]
-                        if url_row.empty: url_row = df_path[df_path['파일명'] == fname]
-                        url = url_row['카카오톡_전송용_URL'].values[0] if not url_row.empty else None
+                        # [매칭 로직 개선] 파일명 정제 후 매칭 시도
+                        clean_name = clean_filename(fname) # L215536_1 -> L215536
+                        clean_digits = get_digits(clean_name) # 215536
+                        
+                        # 1. 숫자 매칭 시도
+                        info = master_map.get(clean_digits)
+                        
+                        # 2. 실패 시 원본명 매칭 시도
+                        if not info:
+                            info = master_map.get(clean_name)
+                            
+                        # 3. 그래도 없으면 기본값
+                        if not info:
+                            info = {'formal': fname, 'name': '정보 없음'}
+
+                        formal = info['formal']
+                        
+                        # 재고 조회용 키 생성 (특수문자 제거, 대문자)
+                        stock_key = re.sub(r'[^A-Z0-9]', '', str(formal).upper())
+                        qty = agg_stock.get(stock_key, 0)
+                        
+                        # 이미지 URL 매칭 (파일명 포함 여부로 검색)
+                        url_match = df_path[df_path['추출된_품번'].astype(str).apply(lambda x: x in fname) | 
+                                          df_path['파일명'].astype(str).apply(lambda x: x in fname)]
+                        
+                        if not url_match.empty:
+                            url = url_match.iloc[0]['카카오톡_전송용_URL']
+                        else:
+                            # 2차 시도: 숫자만으로 매칭
+                            url_match_digit = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fname)]
+                            url = url_match_digit.iloc[0]['카카오톡_전송용_URL'] if not url_match_digit.empty else None
                         
                         results.append({'formal': formal, 'name': info['name'], 'score': sims[i], 'stock': qty, 'url': url})
                     
