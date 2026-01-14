@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+pillow
+tensorflow-cpu
+scikit-learn
+requests
+streamlit-cropper
