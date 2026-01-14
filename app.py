@@ -6,6 +6,7 @@ import re
 import os
 import requests
 import cv2
+import base64
 from PIL import Image, ImageEnhance
 from io import BytesIO
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
@@ -30,6 +31,13 @@ def load_csv_smart(target_name):
                 except: continue
     st.error(f"❌ {target_name} 파일을 찾을 수 없습니다.")
     st.stop()
+
+# [핵심 수정] 이미지를 캔버스가 이해하는 문자열(Base64)로 변환하는 함수
+def pil_to_base64(img):
+    buffered = BytesIO()
+    img.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return f"data:image/png;base64,{img_str}"
 
 @st.cache_resource
 def init_resources():
@@ -123,17 +131,18 @@ if uploaded:
     w_percent = (canvas_width / float(original_image.size[0]))
     h_size = int((float(original_image.size[1]) * float(w_percent)))
     resized_image = original_image.resize((canvas_width, h_size))
+    
+    # [수정] 이미지를 Base64 문자열로 변환하여 전달 (최신 Streamlit 호환)
+    bg_image_url = pil_to_base64(resized_image)
 
     st.info("👇 **이미지 위에서 분석할 영역의 [4개 꼭지점]을 마우스로 클릭하세요.**")
     st.caption("※ 그라데이션이 심한 마루는 여러 쪽을 포함하여 넓게 찍으세요.")
 
-    # [수정] background_image에 PIL 객체를 그대로 넣습니다.
-    # streamlit-drawable-canvas 최신 버전 대응
     canvas_result = st_canvas(
         fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=3,
         stroke_color="#FF0000",
-        background_image=resized_image, # 여기서 에러가 났었습니다. PIL 이미지는 그대로 넣어도 됩니다.
+        background_image=bg_image_url, # Base64 문자열 전달
         update_streamlit=True,
         height=h_size,
         width=canvas_width,
