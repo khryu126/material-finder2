@@ -47,18 +47,6 @@ def load_csv_smart(target_name):
     st.error(f"❌ {target_name} 파일을 찾을 수 없습니다.")
     st.stop()
 
-# 🚀 [핵심 이식] 유대리 스펙체크의 스마트 숫자 추출 함수
-def extract_digits(text):
-    """
-    문자열에서 '의미 있는 품번(4자리 이상)'만 추출
-    예: L215536_01 -> 215536 (01은 무시)
-    """
-    if pd.isna(text) or str(text).strip() == '-': return ""
-    text = str(text)
-    # 4자리 이상 연속된 숫자만 찾음 (버전 번호 등 제외)
-    nums = re.findall(r'\d{4,}', text)
-    return nums[0] if nums else ""
-
 @st.cache_resource
 def init_resources():
     model = ResNet50(weights='imagenet', include_top=False, pooling='avg')
@@ -69,13 +57,7 @@ def init_resources():
     df_stock = load_csv_smart('현재고.csv')
     
     df_stock['재고수량'] = pd.to_numeric(df_stock['재고수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    
-    # 재고 매칭 키 생성 (4자리 이상 숫자만 추출하여 매칭)
-    df_stock['품번_KEY'] = df_stock['품번'].apply(extract_digits)
-    
-    # 키가 없는 경우(짧은 품번)는 그대로 사용
-    df_stock.loc[df_stock['품번_KEY'] == "", '품번_KEY'] = df_stock['품번'].astype(str).str.strip().str.upper()
-    
+    df_stock['품번_KEY'] = df_stock['품번'].astype(str).str.strip().str.upper()
     agg_stock = df_stock.groupby('품번_KEY')['재고수량'].sum().to_dict()
     stock_date = str(int(df_stock['정산일자'].max())) if '정산일자' in df_stock.columns else "확인불가"
     
@@ -83,34 +65,17 @@ def init_resources():
 
 model, feature_db, df_path, df_info, agg_stock, stock_date = init_resources()
 
-# 🧠 [매핑 로직 강화] Lab No와 정식 품번을 완벽하게 연결
+def get_digits(text):
+    return "".join(re.findall(r'\d+', str(text))) if text else ""
+
 @st.cache_data
 def get_master_map():
     mapping = {}
     for _, row in df_info.iterrows():
-        # 데이터 정제
-        f = str(row['상품코드']).strip() if pd.notna(row.get('상품코드')) else ''
-        l = str(row.get('Lab No', '')).strip() if pd.notna(row.get('Lab No')) else ''
-        n = str(row.get('상품명', '')).strip() if pd.notna(row.get('상품명')) else ''
-        
-        # 정식 품번 결정 (상품코드가 없으면 Lab No 사용)
-        formal_code = f if f else l
-        
-        # 정보 딕셔너리
-        info = {'formal': formal_code, 'name': n, 'lab_no': l}
-        
-        # 1. 정식 품번(상품코드)에서 핵심 숫자 추출하여 매핑
-        f_digits = extract_digits(f)
-        if f_digits: mapping[f_digits] = info
-        
-        # 2. Lab No에서 핵심 숫자 추출하여 매핑 (여기가 핵심!)
-        l_digits = extract_digits(l)
-        if l_digits: mapping[l_digits] = info
-        
-        # 3. 원본 문자열도 보조 키로 등록
-        if f: mapping[f] = info
-        if l: mapping[l] = info
-        
+        f, l, n = str(row['상품코드']).strip(), str(row['Lab No']).strip(), str(row['상품명']).strip()
+        val = {'formal': f, 'name': n}
+        if get_digits(l): mapping[get_digits(l)] = val
+        if get_digits(f): mapping[get_digits(f)] = val
     return mapping
 
 master_map = get_master_map()
@@ -189,12 +154,12 @@ if 'points' not in st.session_state: st.session_state['points'] = []
 if 'uploader_key' not in st.session_state: st.session_state['uploader_key'] = 0
 if 'search_done' not in st.session_state: st.session_state['search_done'] = False
 
+# 가이드
 with st.expander("📘 [필독] 사용 방법 (클릭)", expanded=False):
     st.markdown("""
-    1. **원본 종류 선택:** 현장 사진인지, 스캔 파일인지 선택 (스캔 파일은 '전체 선택' 추천)
+    1. **원본 종류 선택:** 현장 사진인지, 디지털 파일인지 선택하세요. (디지털 파일은 '전체 선택' 추천)
     2. **자재 종류:** 마루, 타일 등 특성을 고르면 인식이 더 잘 됩니다.
-    3. **영역 지정:**
-       - **[전체 선택] 버튼:** 이미지가 반듯하다면 한 번에 선택!
+    3. **영역 지정:** - **[전체 선택] 버튼:** 이미지가 반듯하다면 한 번에 선택!
        - **4점 클릭:** 삐뚤어진 사진은 모서리 4개를 찍어서 펴주세요.
     4. **검색:** '검색 시작' 버튼 클릭!
     """)
@@ -226,13 +191,18 @@ if uploaded:
 
     working_img = st.session_state['proc_img']
 
+    # --- [1] 환경 설정 ---
     st.markdown("### 1️⃣ 환경 설정")
     source_type = st.radio("📂 원본 파일 종류", ['📸 현장 촬영 사진', '💻 이미지 파일 (스캔/디지털)'], horizontal=True)
     is_photo = (source_type == '📸 현장 촬영 사진')
 
     col_opt1, col_opt2 = st.columns(2)
     with col_opt1:
-        material_type = st.selectbox("🧱 자재 종류 (자동 필터)", ['일반 (기본)', '마루/우드 (Wood)', '하이그로시/유광 (Glossy)', '벽지/패브릭 (Texture)', '석재/콘크리트 (Stone)'], disabled=not is_photo)
+        material_type = st.selectbox(
+            "🧱 자재 종류 (자동 필터)", 
+            ['일반 (기본)', '마루/우드 (Wood)', '하이그로시/유광 (Glossy)', '벽지/패브릭 (Texture)', '석재/콘크리트 (Stone)'],
+            disabled=not is_photo
+        )
     with col_opt2:
         search_mode = st.radio("🔎 검색 기준", ["🎨 컬러 + 패턴 종합", "🦓 패턴/질감 중심 (색상 무시)"], horizontal=True)
 
@@ -249,13 +219,17 @@ if uploaded:
             brightness = st.slider("밝기", 0.5, 2.0, 1.0, 0.1, disabled=not is_photo)
             sharpness = st.slider("선명도", 0.0, 3.0, 1.5, 0.1, disabled=not is_photo)
 
+    # --- [2] 영역 지정 ---
     st.markdown("### 2️⃣ 영역 지정")
+    
+    # 🌟 [NEW] 전체 선택 버튼 (디지털 파일용)
     col_sel1, col_sel2 = st.columns([3, 2])
     with col_sel1:
         st.info(f"👇 **모서리 4곳을 클릭**하거나 **전체 선택**을 누르세요. ({len(st.session_state['points'])}/4)")
     with col_sel2:
-        if st.button("⏹️ 이미지 전체 선택 (Auto)", type="primary"):
+        if st.button("⏹️ 이미지 전체 선택 (Auto)", type="primary", help="이미지 전체를 분석 영역으로 잡습니다. (스캔 파일용)"):
             w, h = working_img.size
+            # 전체 4점 좌표 자동 생성
             st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]
             st.rerun()
 
@@ -285,6 +259,7 @@ if uploaded:
             st.session_state['points'] = []
             st.rerun()
 
+    # --- [3] 분석 ---
     if len(st.session_state['points']) == 4:
         st.markdown("### 3️⃣ 분석 결과")
         
@@ -316,54 +291,27 @@ if uploaded:
                     results = []
                     for i in range(len(db_names)):
                         fname = db_names[i]
-                        
-                        # [핵심] 유대리 스펙체크 로직 적용
-                        # 파일명에서 핵심 숫자(4자리 이상) 추출
-                        target_digits = extract_digits(fname)
-                        
-                        # 1. 숫자로 매핑 정보 조회
-                        info = master_map.get(target_digits)
-                        
-                        # 2. 실패시 원본 파일명으로 조회
-                        if not info:
-                            # 확장자 등 제거 후 시도
-                            clean_name = os.path.splitext(fname)[0]
-                            info = master_map.get(clean_name)
-                            
-                        # 3. 그래도 없으면 기본값
-                        if not info: 
-                            info = {'formal': fname, 'name': '정보 없음', 'lab_no': '-'}
-
+                        info = master_map.get(get_digits(fname), {'formal': fname, 'name': '정보 없음'})
                         formal = info['formal']
-                        lab_no = info.get('lab_no', '-')
+                        qty = agg_stock.get(formal.strip().upper(), 0)
                         
-                        # 재고 매칭용 키 (숫자만 추출)
-                        stock_key = extract_digits(formal)
-                        if not stock_key: stock_key = str(formal).strip().upper()
+                        url_row = df_path[df_path['추출된_품번'].apply(get_digits) == get_digits(fname)]
+                        if url_row.empty: url_row = df_path[df_path['파일명'] == fname]
+                        url = url_row['카카오톡_전송용_URL'].values[0] if not url_row.empty else None
                         
-                        qty = agg_stock.get(stock_key, 0)
-                        
-                        # 이미지 URL 찾기
-                        url_match = df_path[df_path['추출된_품번'].apply(extract_digits) == target_digits]
-                        url = url_match.iloc[0]['카카오톡_전송용_URL'] if not url_match.empty else None
-                        
-                        results.append({'formal': formal, 'name': info['name'], 'lab_no': lab_no, 'score': sims[i], 'stock': qty, 'url': url})
+                        results.append({'formal': formal, 'name': info['name'], 'score': sims[i], 'stock': qty, 'url': url})
                     
                     results = sorted(results, key=lambda x: x['score'], reverse=True)
                     st.session_state['search_results'] = results
                     st.session_state['search_done'] = True
                     st.rerun()
 
+    # --- [4] 결과 카드 ---
     if st.session_state.get('search_done'):
         st.markdown("---")
         results = st.session_state['search_results']
         def display_card(item, idx):
-            # [UI 개선] 정식 품번과 Lab No 함께 표시
-            title_text = f"{idx}. {item['formal']}"
-            if item['lab_no'] != '-' and item['lab_no'] != item['formal']:
-                title_text += f" (Lab: {item['lab_no']})"
-                
-            st.markdown(f"**{title_text}**")
+            st.markdown(f"**{idx}. {item['formal']}**")
             st.write(f"{item['name']}")
             st.caption(f"유사도: {item['score']:.1%}")
             if item['url']:
