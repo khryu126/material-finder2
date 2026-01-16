@@ -50,26 +50,19 @@ def get_digits(text):
 
 @st.cache_resource
 def init_resources():
-    # Light 버전: ResNet50 단일 엔진
     model_res = ResNet50(weights='imagenet', include_top=False, pooling='avg')
-    
     with open('material_features.pkl', 'rb') as f:
         full_feature_db = pickle.load(f)
-    
-    # [핵심 패치] 하이브리드 벡터(2432)에서 ResNet 부분(2048)만 슬라이싱하여 호환성 확보
     feature_db = {k: v[:2048] for k, v in full_feature_db.items()}
-    
     df_path = load_csv_smart('이미지경로.csv')
     df_info = load_csv_smart('품목정보.csv')
     df_stock = load_csv_smart('현재고.csv')
-    
     agg_stock, stock_date = {}, "확인불가"
     if not df_stock.empty:
         df_stock['재고수량'] = pd.to_numeric(df_stock['재고수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         df_stock['품번_KEY'] = df_stock['품번'].astype(str).str.strip().str.upper()
         agg_stock = df_stock.groupby('품번_KEY')['재고수량'].sum().to_dict()
         if '정산일자' in df_stock.columns: stock_date = str(int(df_stock['정산일자'].max()))
-            
     return model_res, feature_db, df_path, df_info, agg_stock, stock_date
 
 res_model, feature_db, df_path, df_info, agg_stock, stock_date = init_resources()
@@ -86,7 +79,7 @@ def get_master_map():
 
 master_map = get_master_map()
 
-# --- [2] 이미지 처리 엔진 (v3.9.6 로직 보존) ---
+# --- [2] 이미지 처리 엔진 ---
 def apply_advanced_correction(img, state):
     img = ImageEnhance.Brightness(img).enhance(state['bri'])
     img = ImageEnhance.Contrast(img).enhance(state['con'])
@@ -132,7 +125,6 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("Deco Finder Light")
-st.caption("Simplified Engine for Multi-user Environment")
 
 if 'adj_state' not in st.session_state:
     st.session_state['adj_state'] = {'bri': 1.0, 'con': 1.0, 'shp': 1.0, 'sat': 1.0, 'exp': 1.0, 'temp': 1.0, 'hue': 0}
@@ -186,12 +178,18 @@ if uploaded:
         s_mode = st.radio("분석 모드", ["종합(컬러+패턴)", "패턴 중심(흑백)"], horizontal=True)
         c_btn1, c_btn2 = st.columns(2)
         with c_btn1:
-            if st.button("🔄 새로고침", use_container_width=True): 
-                st.session_state['refresh_count'] = time.time(); st.rerun()
+            if st.button("🔄 새로고침", use_container_width=True): st.session_state['refresh_count'] = time.time(); st.rerun()
         with c_btn2:
             if st.button("↪️ 90도 회전", use_container_width=True):
                 st.session_state['proc_img'] = working_img.transpose(Image.ROTATE_270)
                 st.session_state['points'] = []; st.rerun()
+        
+        # [신규 추가] ⏹️ 전체 선택 버튼
+        if st.button("⏹️ 전체 선택 (Select All)", use_container_width=True, type="secondary"):
+            st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]
+            st.rerun()
+        
+        if st.button("📍 점 다시찍기", use_container_width=True): st.session_state['points'] = []; st.rerun()
 
     with col_pad:
         d_img = working_img.resize((int(w*scale), int(h*scale)), Image.Resampling.LANCZOS)
@@ -201,7 +199,9 @@ if uploaded:
             draw.ellipse((px-8, py-8, px+8, py+8), fill='#B67741', outline='white', width=2)
             draw.text((px+12, py-12), str(i+1), fill='red')
         if len(st.session_state['points']) == 4:
-            draw.polygon([tuple((p[0]*scale, p[1]*scale)) for p in st.session_state['points']], outline='#00FF00', width=3)
+            # 점 정렬 로직 적용하여 다각형 그리기
+            rect_pts = np.array(st.session_state['points'], dtype="float32")
+            draw.polygon([tuple((p[0]*scale, p[1]*scale)) for p in rect_pts], outline='#00FF00', width=3)
         coords = streamlit_image_coordinates(d_img, key=f"deco_{st.session_state['refresh_count']}")
         if coords and len(st.session_state['points']) < 4:
             new_p = (coords['x']/scale, coords['y']/scale)
@@ -218,7 +218,6 @@ if uploaded:
             with st.spinner('ResNet 연산 중...'):
                 x_res = k_image.img_to_array(final_img.resize((224, 224)))
                 q_res = res_model.predict(preprocess_input(np.expand_dims(x_res, axis=0)), verbose=0).flatten()
-                
                 results = []
                 for fn, db_vec in feature_db.items():
                     score = cosine_similarity([q_res], [db_vec])[0][0]
@@ -229,13 +228,12 @@ if uploaded:
                     url_row = df_path[df_path['추출된_품번'].apply(get_digits) == d_key]
                     url = url_row['카카오톡_전송용_URL'].values[0] if not url_row.empty else None
                     if url: results.append({'formal': f_code, 'name': p_name, 'score': score, 'url': url, 'stock': qty})
-                
                 results.sort(key=lambda x: x['score'], reverse=True)
                 st.session_state['res_all'] = results[:15]
                 st.session_state['res_stock'] = [r for r in results if r['stock'] > 0][:15]
                 gc.collect(); st.session_state['search_done'] = True; st.rerun()
 
-# --- [4] 결과 출력 (모바일 행 정렬 유지) ---
+# --- [4] 결과 출력 ---
 if st.session_state.get('search_done') and st.session_state.get('res_all'):
     st.markdown("---")
     tab1, tab2 = st.tabs(["📊 전체 결과", "✅ 재고 보유"])
