@@ -31,10 +31,18 @@ def get_direct_url(url):
 @st.cache_data(ttl=3600)
 def get_image_as_base64(url):
     try:
-        r = requests.get(get_direct_url(url), timeout=10)
-        img_str = base64.b64encode(r.content).decode()
+        # [수정] TIF 지원을 위해 Pillow로 이미지 포맷을 변환하여 전송합니다.
+        r = requests.get(get_direct_url(url), timeout=15)
+        img = Image.open(BytesIO(r.content))
+        
+        buffered = BytesIO()
+        # RGB 모드로 변환하여 TIF 특유의 채널 문제를 방지한 후 PNG 저장
+        img.convert("RGB").save(buffered, format="PNG")
+        
+        img_str = base64.b64encode(buffered.getvalue()).decode()
         return f"data:image/png;base64,{img_str}"
-    except: return None
+    except Exception:
+        return None
 
 def load_csv_smart(target_name):
     files = os.listdir('.')
@@ -184,7 +192,6 @@ if uploaded:
                 st.session_state['proc_img'] = working_img.transpose(Image.ROTATE_270)
                 st.session_state['points'] = []; st.rerun()
         
-        # [신규 추가] ⏹️ 전체 선택 버튼
         if st.button("⏹️ 전체 선택 (Select All)", use_container_width=True, type="secondary"):
             st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]
             st.rerun()
@@ -199,7 +206,6 @@ if uploaded:
             draw.ellipse((px-8, py-8, px+8, py+8), fill='#B67741', outline='white', width=2)
             draw.text((px+12, py-12), str(i+1), fill='red')
         if len(st.session_state['points']) == 4:
-            # 점 정렬 로직 적용하여 다각형 그리기
             rect_pts = np.array(st.session_state['points'], dtype="float32")
             draw.polygon([tuple((p[0]*scale, p[1]*scale)) for p in rect_pts], outline='#00FF00', width=3)
         coords = streamlit_image_coordinates(d_img, key=f"deco_{st.session_state['refresh_count']}")
