@@ -31,14 +31,11 @@ def get_direct_url(url):
 @st.cache_data(ttl=3600)
 def get_image_as_base64(url):
     try:
-        # [수정] TIF 지원을 위해 Pillow로 이미지 포맷을 변환하여 전송합니다.
+        # TIF 지원 패치 유지: Pillow로 열어서 PNG로 변환 후 전송
         r = requests.get(get_direct_url(url), timeout=15)
         img = Image.open(BytesIO(r.content))
-        
         buffered = BytesIO()
-        # RGB 모드로 변환하여 TIF 특유의 채널 문제를 방지한 후 PNG 저장
         img.convert("RGB").save(buffered, format="PNG")
-        
         img_str = base64.b64encode(buffered.getvalue()).decode()
         return f"data:image/png;base64,{img_str}"
     except Exception:
@@ -65,29 +62,30 @@ def init_resources():
     df_path = load_csv_smart('이미지경로.csv')
     df_info = load_csv_smart('품목정보.csv')
     df_stock = load_csv_smart('현재고.csv')
+    
     agg_stock, stock_date = {}, "확인불가"
     if not df_stock.empty:
         df_stock['재고수량'] = pd.to_numeric(df_stock['재고수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         df_stock['품번_KEY'] = df_stock['품번'].astype(str).str.strip().str.upper()
         agg_stock = df_stock.groupby('품번_KEY')['재고수량'].sum().to_dict()
-        if '정산일자' in df_stock.columns: stock_date = str(int(df_stock['정산일자'].max()))
+        
+        # [신규 날짜 로직] 정산일자가 문자열(YYYY-MM-DD)이거나 비어있어도 첫 줄에서 날짜 추출
+        if '정산일자' in df_stock.columns:
+            valid_dates = df_stock['정산일자'].dropna()
+            if not valid_dates.empty:
+                raw_val = valid_dates.iloc[0] # 데이터 파일의 날짜가 적힌 첫 번째 행 사용
+                try:
+                    # 숫자로만 된 날짜라면 정수형 변환 (예: 20241031.0 -> 20241031)
+                    stock_date = str(int(float(raw_val)))
+                except:
+                    # 문자열 형태라면 그대로 사용 (예: 2026-01-19)
+                    stock_date = str(raw_val)
+                    
     return model_res, feature_db, df_path, df_info, agg_stock, stock_date
 
 res_model, feature_db, df_path, df_info, agg_stock, stock_date = init_resources()
 
-@st.cache_data
-def get_master_map():
-    mapping = {}
-    for _, row in df_info.iterrows():
-        f = str(row.get('상품코드', '')).strip()
-        n = str(row.get('상품명', '')).strip()
-        d = get_digits(f)
-        if d: mapping[d] = {'formal': f, 'name': n}
-    return mapping
-
-master_map = get_master_map()
-
-# --- [2] 이미지 처리 엔진 ---
+# --- [2] 이미지 처리 엔진 (동일) ---
 def apply_advanced_correction(img, state):
     img = ImageEnhance.Brightness(img).enhance(state['bri'])
     img = ImageEnhance.Contrast(img).enhance(state['con'])
@@ -193,8 +191,7 @@ if uploaded:
                 st.session_state['points'] = []; st.rerun()
         
         if st.button("⏹️ 전체 선택 (Select All)", use_container_width=True, type="secondary"):
-            st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]
-            st.rerun()
+            st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]; st.rerun()
         
         if st.button("📍 점 다시찍기", use_container_width=True): st.session_state['points'] = []; st.rerun()
 
